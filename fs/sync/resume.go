@@ -79,7 +79,7 @@ func (s *syncCopyMove) resumeRun() error {
 func (s *syncCopyMove) resumeValidate() error {
 	switch {
 	case s.deleteMode != fs.DeleteModeOff:
-		return fserrors.FatalError(errors.New("--resume currently supports copy/check only, not sync deletes"))
+		return fserrors.FatalError(errors.New("--resume currently supports copy only, not sync deletes"))
 	case s.DoMove:
 		return fserrors.FatalError(errors.New("--resume currently does not support move"))
 	case s.ci.DryRun:
@@ -257,11 +257,12 @@ func (s *syncCopyMove) runResumeSourceScan(store *resume.Store, snapshot *resume
 					return dirErr
 				}
 				frame.LastDoneEntryKey = cursorKey
+				frames = append(frames, resume.ScanFrame{Dir: x.Remote(), DstDir: nextDstDir})
 				scan := s.resumeCopyScanState(frames, false, snapshot.Totals.PendingFailedCount)
 				if err = store.SaveScan(scan); err != nil {
 					return err
 				}
-				frames = append(frames, resume.ScanFrame{Dir: x.Remote(), DstDir: nextDstDir})
+				snapshot.Scan = scan
 				descended = true
 			case fs.Object:
 				task, alreadyDone, fileErr := s.prepareResumeCopyTask(store, x, dstByKey[matchKey], cursorKey)

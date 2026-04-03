@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/cache"
 	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/rc"
@@ -145,6 +146,9 @@ func TestRcResumeStatusAndClear(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, meta.JobID, out["jobId"])
 	assert.Equal(t, true, out["found"])
+	totals, ok := out["totals"].(resume.CounterState)
+	require.True(t, ok)
+	assert.Equal(t, int64(1), totals.PendingFailedCount)
 	failed, ok := out["failed"].([]resume.FailedRecord)
 	require.True(t, ok)
 	require.Len(t, failed, 1)
@@ -158,4 +162,58 @@ func TestRcResumeStatusAndClear(t *testing.T) {
 	out, err = call.Fn(ctx, rc.Params{"jobId": meta.JobID})
 	require.NoError(t, err)
 	assert.Equal(t, false, out["found"])
+	failed, ok = out["failed"].([]resume.FailedRecord)
+	require.True(t, ok)
+	assert.Nil(t, failed)
+}
+
+func TestRcResumeStatusWithoutState(t *testing.T) {
+	require.NoError(t, config.SetCacheDir(t.TempDir()))
+	_, call := rcNewRun(t, "sync/resume/status")
+
+	out, err := call.Fn(context.Background(), rc.Params{"jobId": "missing-job"})
+	require.NoError(t, err)
+	assert.Equal(t, "missing-job", out["jobId"])
+	assert.Equal(t, false, out["found"])
+	failed, ok := out["failed"].([]resume.FailedRecord)
+	require.True(t, ok)
+	assert.Nil(t, failed)
+}
+
+func TestRcResumeStatusAndClearDerivedJobID(t *testing.T) {
+	require.NoError(t, config.SetCacheDir(t.TempDir()))
+	r, call := rcNewRun(t, "sync/resume/status")
+	clearCall := rc.Calls.Get("sync/resume/clear")
+	require.NotNil(t, clearCall)
+
+	ctx := context.Background()
+	jobID := resume.DerivedJobID(resume.NewMeta(ctx, "copy", r.Flocal, r.Fremote))
+	store, err := resume.Open(ctx, jobID)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, store.Close(false))
+	}()
+
+	_, _, err = store.LoadOrInit(resume.Meta{
+		FormatVersion: resume.FormatVersion,
+		JobID:         jobID,
+		Op:            "copy",
+		SrcConfig:     fs.ConfigStringFull(r.Flocal),
+		DstConfig:     fs.ConfigStringFull(r.Fremote),
+	}, resume.ScanState{
+		Phase:  resume.PhaseCopySource,
+		Target: "src",
+		Frames: []resume.ScanFrame{{Dir: "", DstDir: ""}},
+	})
+	require.NoError(t, err)
+
+	in := rc.Params{"srcFs": r.LocalName, "dstFs": r.FremoteName}
+	out, err := call.Fn(ctx, in)
+	require.NoError(t, err)
+	assert.Equal(t, jobID, out["jobId"])
+	assert.Equal(t, true, out["found"])
+
+	clearOut, err := clearCall.Fn(ctx, in)
+	require.NoError(t, err)
+	assert.Equal(t, true, clearOut["cleared"])
 }

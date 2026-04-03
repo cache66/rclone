@@ -114,14 +114,18 @@ func rcResumeStatus(ctx context.Context, in rc.Params) (out rc.Params, err error
 	if err != nil {
 		return nil, err
 	}
+	found := snapshot.Meta.JobID != ""
 	failed, err := store.ListFailed()
 	if err != nil {
 		return nil, err
 	}
+	if !found {
+		failed = nil
+	}
 
 	return rc.Params{
 		"jobId":   jobID,
-		"found":   snapshot.Meta.JobID != "",
+		"found":   found,
 		"meta":    snapshot.Meta,
 		"scan":    snapshot.Scan,
 		"totals":  snapshot.Totals,

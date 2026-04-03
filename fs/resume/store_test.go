@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/rclone/rclone/fs/config"
+	"github.com/rclone/rclone/lib/kv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -131,4 +132,51 @@ func TestStoreFailureSuccessLifecycle(t *testing.T) {
 	failedRecords, err = store.ListFailed()
 	require.NoError(t, err)
 	assert.Empty(t, failedRecords)
+}
+
+func TestLoadOrInitRejectsCorruptMeta(t *testing.T) {
+	cacheDir := t.TempDir()
+	require.NoError(t, config.SetCacheDir(cacheDir))
+
+	ctx := context.Background()
+	store, err := Open(ctx, "resume-corrupt-meta")
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, store.Close(true))
+	}()
+
+	err = store.db.Do(true, bucketOp(func(ctx context.Context, b kv.Bucket) error {
+		return b.Put([]byte(store.metaKey()), []byte("{not-json"))
+	}))
+	require.NoError(t, err)
+
+	_, _, err = store.LoadOrInit(Meta{
+		FormatVersion: FormatVersion,
+		JobID:         "resume-corrupt-meta",
+		Op:            "copy",
+		SrcConfig:     "src",
+		DstConfig:     "dst",
+	}, ScanState{
+		Phase:  PhaseCopySource,
+		Target: "src",
+		Frames: []ScanFrame{{Dir: ""}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode resume meta")
+}
+
+func TestSnapshotReturnsEmptyWhenStateMissing(t *testing.T) {
+	cacheDir := t.TempDir()
+	require.NoError(t, config.SetCacheDir(cacheDir))
+
+	ctx := context.Background()
+	store, err := Open(ctx, "resume-empty-snapshot")
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, store.Close(true))
+	}()
+
+	snapshot, err := store.Snapshot()
+	require.NoError(t, err)
+	assert.Equal(t, Snapshot{}, snapshot)
 }
