@@ -52,6 +52,9 @@ you what happened to it. These are reminiscent of diff files.
 The default number of parallel checks is 8. See the [--checkers](/docs/#checkers-int)
 option for more information.
 
+**Note**: The `--resume` flag is not supported by `check` in this version.
+Resume V1 currently supports `copy` only.
+
 ```
 rclone check source:path dest:path [flags]
 ```

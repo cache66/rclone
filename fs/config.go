@@ -566,120 +566,150 @@ var ConfigOptionsInfo = Options{{
 	Default: "",
 	Help:    "HTTP proxy URL.",
 	Groups:  "Networking",
+}, {
+	Name:    "resume",
+	Default: false,
+	Help:    "Enable resumable copy execution with persisted scan state, counters, and failed items. V1 supports copy only.",
+	Groups:  "Copy",
+}, {
+	Name:    "resume_id",
+	Default: "",
+	Help:    "Identifier for the persisted copy resume state. Empty uses a derived ID from the command and remotes.",
+	Groups:  "Copy",
+}, {
+	Name:    "resume_error_limit",
+	Default: int64(-1),
+	Help:    "Maximum number of distinct pending failed items to keep before resume copy stops. -1 means unlimited.",
+	Groups:  "Copy",
+}, {
+	Name:    "resume_error_limit_action",
+	Default: ResumeErrorLimitActionContinue,
+	Help:    "Deprecated for resume copy V1. Exceeding --resume-error-limit stops the job regardless of this setting.",
+	Groups:  "Copy",
+}, {
+	Name:    "resume_history_limit",
+	Default: 100,
+	Help:    "Maximum number of recent success/failure events to persist for restored copy progress and logs.",
+	Groups:  "Copy",
 }}
 
 // ConfigInfo is filesystem config options
 type ConfigInfo struct {
-	LogLevel                   LogLevel          `config:"log_level"`
-	StatsLogLevel              LogLevel          `config:"stats_log_level"`
-	UseJSONLog                 bool              `config:"use_json_log"`
-	DryRun                     bool              `config:"dry_run"`
-	Interactive                bool              `config:"interactive"`
-	Links                      bool              `config:"links"`
-	CheckSum                   bool              `config:"checksum"`
-	SizeOnly                   bool              `config:"size_only"`
-	IgnoreTimes                bool              `config:"ignore_times"`
-	IgnoreExisting             bool              `config:"ignore_existing"`
-	IgnoreErrors               bool              `config:"ignore_errors"`
-	ModifyWindow               Duration          `config:"modify_window"`
-	Checkers                   int               `config:"checkers"`
-	Transfers                  int               `config:"transfers"`
-	ConnectTimeout             Duration          `config:"contimeout"` // Connect timeout
-	Timeout                    Duration          `config:"timeout"`    // Data channel timeout
-	ExpectContinueTimeout      Duration          `config:"expect_continue_timeout"`
-	Dump                       DumpFlags         `config:"dump"`
-	InsecureSkipVerify         bool              `config:"no_check_certificate"` // Skip server certificate verification
-	DeleteMode                 DeleteMode        `config:"delete_mode"`
-	MaxDelete                  int64             `config:"max_delete"`
-	MaxDeleteSize              SizeSuffix        `config:"max_delete_size"`
-	TrackRenames               bool              `config:"track_renames"`          // Track file renames.
-	TrackRenamesStrategy       string            `config:"track_renames_strategy"` // Comma separated list of strategies used to track renames
-	Retries                    int               `config:"retries"`                // High-level retries
-	RetriesInterval            Duration          `config:"retries_sleep"`
-	LowLevelRetries            int               `config:"low_level_retries"`
-	UpdateOlder                bool              `config:"update"`           // Skip files that are newer on the destination
-	NoGzip                     bool              `config:"no_gzip_encoding"` // Disable compression
-	MaxDepth                   int               `config:"max_depth"`
-	IgnoreSize                 bool              `config:"ignore_size"`
-	IgnoreChecksum             bool              `config:"ignore_checksum"`
-	IgnoreCaseSync             bool              `config:"ignore_case_sync"`
-	FixCase                    bool              `config:"fix_case"`
-	NoTraverse                 bool              `config:"no_traverse"`
-	CheckFirst                 bool              `config:"check_first"`
-	NoCheckDest                bool              `config:"no_check_dest"`
-	NoUnicodeNormalization     bool              `config:"no_unicode_normalization"`
-	NoUpdateModTime            bool              `config:"no_update_modtime"`
-	NoUpdateDirModTime         bool              `config:"no_update_dir_modtime"`
-	DataRateUnit               string            `config:"stats_unit"`
-	CompareDest                []string          `config:"compare_dest"`
-	CopyDest                   []string          `config:"copy_dest"`
-	BackupDir                  string            `config:"backup_dir"`
-	Suffix                     string            `config:"suffix"`
-	SuffixKeepExtension        bool              `config:"suffix_keep_extension"`
-	UseListR                   bool              `config:"fast_list"`
-	ListCutoff                 int               `config:"list_cutoff"`
-	BufferSize                 SizeSuffix        `config:"buffer_size"`
-	BwLimit                    BwTimetable       `config:"bwlimit"`
-	BwLimitFile                BwTimetable       `config:"bwlimit_file"`
-	TPSLimit                   float64           `config:"tpslimit"`
-	TPSLimitBurst              int               `config:"tpslimit_burst"`
-	BindAddr                   net.IP            `config:"bind_addr"`
-	DisableFeatures            []string          `config:"disable"`
-	UserAgent                  string            `config:"user_agent"`
-	Immutable                  bool              `config:"immutable"`
-	AutoConfirm                bool              `config:"auto_confirm"`
-	StreamingUploadCutoff      SizeSuffix        `config:"streaming_upload_cutoff"`
-	StatsFileNameLength        int               `config:"stats_file_name_length"`
-	AskPassword                bool              `config:"ask_password"`
-	PasswordCommand            SpaceSepList      `config:"password_command"`
-	UseServerModTime           bool              `config:"use_server_modtime"`
-	MaxTransfer                SizeSuffix        `config:"max_transfer"`
-	MaxDuration                Duration          `config:"max_duration"`
-	CutoffMode                 CutoffMode        `config:"cutoff_mode"`
-	MaxBacklog                 int               `config:"max_backlog"`
-	MaxStatsGroups             int               `config:"max_stats_groups"`
-	StatsOneLine               bool              `config:"stats_one_line"`
-	StatsOneLineDate           bool              `config:"stats_one_line_date"`        // If we want a date prefix at all
-	StatsOneLineDateFormat     string            `config:"stats_one_line_date_format"` // If we want to customize the prefix
-	ErrorOnNoTransfer          bool              `config:"error_on_no_transfer"`       // Set appropriate exit code if no files transferred
-	Progress                   bool              `config:"progress"`
-	ProgressTerminalTitle      bool              `config:"progress_terminal_title"`
-	Cookie                     bool              `config:"use_cookies"`
-	UseMmap                    bool              `config:"use_mmap"`
-	MaxBufferMemory            SizeSuffix        `config:"max_buffer_memory"`
-	CaCert                     []string          `config:"ca_cert"`     // Client Side CA
-	ClientCert                 string            `config:"client_cert"` // Client Side Cert
-	ClientKey                  string            `config:"client_key"`  // Client Side Key
-	ClientPass                 string            `config:"client_pass"` // Client Side Key Password (obscured)
-	MultiThreadCutoff          SizeSuffix        `config:"multi_thread_cutoff"`
-	MultiThreadStreams         int               `config:"multi_thread_streams"`
-	MultiThreadSet             bool              `config:"multi_thread_set"`        // whether MultiThreadStreams was set (set in fs/config/configflags)
-	MultiThreadChunkSize       SizeSuffix        `config:"multi_thread_chunk_size"` // Chunk size for multi-thread downloads / uploads, if not set by filesystem
-	MultiThreadWriteBufferSize SizeSuffix        `config:"multi_thread_write_buffer_size"`
-	OrderBy                    string            `config:"order_by"` // instructions on how to order the transfer
-	UploadHeaders              []*HTTPOption     `config:"upload_headers"`
-	DownloadHeaders            []*HTTPOption     `config:"download_headers"`
-	Headers                    []*HTTPOption     `config:"headers"`
-	MetadataSet                Metadata          `config:"metadata_set"` // extra metadata to write when uploading
-	RefreshTimes               bool              `config:"refresh_times"`
-	NoConsole                  bool              `config:"no_console"`
-	TrafficClass               uint8             `config:"traffic_class"`
-	FsCacheExpireDuration      Duration          `config:"fs_cache_expire_duration"`
-	FsCacheExpireInterval      Duration          `config:"fs_cache_expire_interval"`
-	DisableHTTP2               bool              `config:"disable_http2"`
-	HumanReadable              bool              `config:"human_readable"`
-	KvLockTime                 Duration          `config:"kv_lock_time"` // maximum time to keep key-value database locked by process
-	DisableHTTPKeepAlives      bool              `config:"disable_http_keep_alives"`
-	Metadata                   bool              `config:"metadata"`
-	ServerSideAcrossConfigs    bool              `config:"server_side_across_configs"`
-	TerminalColorMode          TerminalColorMode `config:"color"`
-	DefaultTime                Time              `config:"default_time"` // time that directories with no time should display
-	Inplace                    bool              `config:"inplace"`      // Download directly to destination file instead of atomic download to temp/rename
-	PartialSuffix              string            `config:"partial_suffix"`
-	MetadataMapper             SpaceSepList      `config:"metadata_mapper"`
-	MaxConnections             int               `config:"max_connections"`
-	NameTransform              []string          `config:"name_transform"`
-	HTTPProxy                  string            `config:"http_proxy"`
+	LogLevel                   LogLevel               `config:"log_level"`
+	StatsLogLevel              LogLevel               `config:"stats_log_level"`
+	UseJSONLog                 bool                   `config:"use_json_log"`
+	DryRun                     bool                   `config:"dry_run"`
+	Interactive                bool                   `config:"interactive"`
+	Links                      bool                   `config:"links"`
+	CheckSum                   bool                   `config:"checksum"`
+	SizeOnly                   bool                   `config:"size_only"`
+	IgnoreTimes                bool                   `config:"ignore_times"`
+	IgnoreExisting             bool                   `config:"ignore_existing"`
+	IgnoreErrors               bool                   `config:"ignore_errors"`
+	ModifyWindow               Duration               `config:"modify_window"`
+	Checkers                   int                    `config:"checkers"`
+	Transfers                  int                    `config:"transfers"`
+	ConnectTimeout             Duration               `config:"contimeout"` // Connect timeout
+	Timeout                    Duration               `config:"timeout"`    // Data channel timeout
+	ExpectContinueTimeout      Duration               `config:"expect_continue_timeout"`
+	Dump                       DumpFlags              `config:"dump"`
+	InsecureSkipVerify         bool                   `config:"no_check_certificate"` // Skip server certificate verification
+	DeleteMode                 DeleteMode             `config:"delete_mode"`
+	MaxDelete                  int64                  `config:"max_delete"`
+	MaxDeleteSize              SizeSuffix             `config:"max_delete_size"`
+	TrackRenames               bool                   `config:"track_renames"`          // Track file renames.
+	TrackRenamesStrategy       string                 `config:"track_renames_strategy"` // Comma separated list of strategies used to track renames
+	Retries                    int                    `config:"retries"`                // High-level retries
+	RetriesInterval            Duration               `config:"retries_sleep"`
+	LowLevelRetries            int                    `config:"low_level_retries"`
+	UpdateOlder                bool                   `config:"update"`           // Skip files that are newer on the destination
+	NoGzip                     bool                   `config:"no_gzip_encoding"` // Disable compression
+	MaxDepth                   int                    `config:"max_depth"`
+	IgnoreSize                 bool                   `config:"ignore_size"`
+	IgnoreChecksum             bool                   `config:"ignore_checksum"`
+	IgnoreCaseSync             bool                   `config:"ignore_case_sync"`
+	FixCase                    bool                   `config:"fix_case"`
+	NoTraverse                 bool                   `config:"no_traverse"`
+	CheckFirst                 bool                   `config:"check_first"`
+	NoCheckDest                bool                   `config:"no_check_dest"`
+	NoUnicodeNormalization     bool                   `config:"no_unicode_normalization"`
+	NoUpdateModTime            bool                   `config:"no_update_modtime"`
+	NoUpdateDirModTime         bool                   `config:"no_update_dir_modtime"`
+	DataRateUnit               string                 `config:"stats_unit"`
+	CompareDest                []string               `config:"compare_dest"`
+	CopyDest                   []string               `config:"copy_dest"`
+	BackupDir                  string                 `config:"backup_dir"`
+	Suffix                     string                 `config:"suffix"`
+	SuffixKeepExtension        bool                   `config:"suffix_keep_extension"`
+	UseListR                   bool                   `config:"fast_list"`
+	ListCutoff                 int                    `config:"list_cutoff"`
+	BufferSize                 SizeSuffix             `config:"buffer_size"`
+	BwLimit                    BwTimetable            `config:"bwlimit"`
+	BwLimitFile                BwTimetable            `config:"bwlimit_file"`
+	TPSLimit                   float64                `config:"tpslimit"`
+	TPSLimitBurst              int                    `config:"tpslimit_burst"`
+	BindAddr                   net.IP                 `config:"bind_addr"`
+	DisableFeatures            []string               `config:"disable"`
+	UserAgent                  string                 `config:"user_agent"`
+	Immutable                  bool                   `config:"immutable"`
+	AutoConfirm                bool                   `config:"auto_confirm"`
+	StreamingUploadCutoff      SizeSuffix             `config:"streaming_upload_cutoff"`
+	StatsFileNameLength        int                    `config:"stats_file_name_length"`
+	AskPassword                bool                   `config:"ask_password"`
+	PasswordCommand            SpaceSepList           `config:"password_command"`
+	UseServerModTime           bool                   `config:"use_server_modtime"`
+	MaxTransfer                SizeSuffix             `config:"max_transfer"`
+	MaxDuration                Duration               `config:"max_duration"`
+	CutoffMode                 CutoffMode             `config:"cutoff_mode"`
+	MaxBacklog                 int                    `config:"max_backlog"`
+	MaxStatsGroups             int                    `config:"max_stats_groups"`
+	StatsOneLine               bool                   `config:"stats_one_line"`
+	StatsOneLineDate           bool                   `config:"stats_one_line_date"`        // If we want a date prefix at all
+	StatsOneLineDateFormat     string                 `config:"stats_one_line_date_format"` // If we want to customize the prefix
+	ErrorOnNoTransfer          bool                   `config:"error_on_no_transfer"`       // Set appropriate exit code if no files transferred
+	Progress                   bool                   `config:"progress"`
+	ProgressTerminalTitle      bool                   `config:"progress_terminal_title"`
+	Cookie                     bool                   `config:"use_cookies"`
+	UseMmap                    bool                   `config:"use_mmap"`
+	MaxBufferMemory            SizeSuffix             `config:"max_buffer_memory"`
+	CaCert                     []string               `config:"ca_cert"`     // Client Side CA
+	ClientCert                 string                 `config:"client_cert"` // Client Side Cert
+	ClientKey                  string                 `config:"client_key"`  // Client Side Key
+	ClientPass                 string                 `config:"client_pass"` // Client Side Key Password (obscured)
+	MultiThreadCutoff          SizeSuffix             `config:"multi_thread_cutoff"`
+	MultiThreadStreams         int                    `config:"multi_thread_streams"`
+	MultiThreadSet             bool                   `config:"multi_thread_set"`        // whether MultiThreadStreams was set (set in fs/config/configflags)
+	MultiThreadChunkSize       SizeSuffix             `config:"multi_thread_chunk_size"` // Chunk size for multi-thread downloads / uploads, if not set by filesystem
+	MultiThreadWriteBufferSize SizeSuffix             `config:"multi_thread_write_buffer_size"`
+	OrderBy                    string                 `config:"order_by"` // instructions on how to order the transfer
+	UploadHeaders              []*HTTPOption          `config:"upload_headers"`
+	DownloadHeaders            []*HTTPOption          `config:"download_headers"`
+	Headers                    []*HTTPOption          `config:"headers"`
+	MetadataSet                Metadata               `config:"metadata_set"` // extra metadata to write when uploading
+	RefreshTimes               bool                   `config:"refresh_times"`
+	NoConsole                  bool                   `config:"no_console"`
+	TrafficClass               uint8                  `config:"traffic_class"`
+	FsCacheExpireDuration      Duration               `config:"fs_cache_expire_duration"`
+	FsCacheExpireInterval      Duration               `config:"fs_cache_expire_interval"`
+	DisableHTTP2               bool                   `config:"disable_http2"`
+	HumanReadable              bool                   `config:"human_readable"`
+	KvLockTime                 Duration               `config:"kv_lock_time"` // maximum time to keep key-value database locked by process
+	Resume                     bool                   `config:"resume"`
+	ResumeID                   string                 `config:"resume_id"`
+	ResumeErrorLimit           int64                  `config:"resume_error_limit"`
+	ResumeErrorLimitAction     ResumeErrorLimitAction `config:"resume_error_limit_action"`
+	ResumeHistoryLimit         int                    `config:"resume_history_limit"`
+	DisableHTTPKeepAlives      bool                   `config:"disable_http_keep_alives"`
+	Metadata                   bool                   `config:"metadata"`
+	ServerSideAcrossConfigs    bool                   `config:"server_side_across_configs"`
+	TerminalColorMode          TerminalColorMode      `config:"color"`
+	DefaultTime                Time                   `config:"default_time"` // time that directories with no time should display
+	Inplace                    bool                   `config:"inplace"`      // Download directly to destination file instead of atomic download to temp/rename
+	PartialSuffix              string                 `config:"partial_suffix"`
+	MetadataMapper             SpaceSepList           `config:"metadata_mapper"`
+	MaxConnections             int                    `config:"max_connections"`
+	NameTransform              []string               `config:"name_transform"`
+	HTTPProxy                  string                 `config:"http_proxy"`
 }
 
 func init() {
@@ -748,6 +778,13 @@ func (ci *ConfigInfo) Reload(ctx context.Context) error {
 	nonZero(&ci.LowLevelRetries)
 	nonZero(&ci.Transfers)
 	nonZero(&ci.Checkers)
+
+	if ci.ResumeErrorLimit < -1 {
+		return fmt.Errorf("--resume-error-limit must be >= -1")
+	}
+	if ci.ResumeHistoryLimit < 0 {
+		return fmt.Errorf("--resume-history-limit must be >= 0")
+	}
 
 	return LogReload(ci)
 }

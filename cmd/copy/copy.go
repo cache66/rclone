@@ -106,6 +106,12 @@ for more info.
 **Note**: Use the |--dry-run| or the |--interactive|/|-i| flag to test without
 copying anything.
 
+**Note**: The |--resume| flag is supported for |copy| in V1. It restores
+the copy scan cursor, completed transfer counters, and failed item state
+after an interruption, then continues from the previous position. It is
+file-level resume only and does not resume partial contents of a single
+large file.
+
 `, "|", "`") + operationsflags.Help(),
 	Annotations: map[string]string{
 		"groups": "Copy,Filter,Listing,Important",

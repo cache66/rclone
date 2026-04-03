@@ -3,9 +3,12 @@ package sync
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/rclone/rclone/fs/cache"
+	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/rc"
+	"github.com/rclone/rclone/fs/resume"
 	"github.com/rclone/rclone/fstest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -93,4 +96,66 @@ func TestRcSync(t *testing.T) {
 
 	r.CheckLocalItems(t, file1, file2)
 	r.CheckRemoteItems(t, file1, file2)
+}
+
+func TestRcResumeStatusAndClear(t *testing.T) {
+	require.NoError(t, config.SetCacheDir(t.TempDir()))
+	r, call := rcNewRun(t, "sync/resume/status")
+	clearCall := rc.Calls.Get("sync/resume/clear")
+	require.NotNil(t, clearCall)
+
+	ctx := context.Background()
+	meta := resume.NewMeta(ctx, "copy", r.Flocal, r.Fremote)
+	meta.JobID = "resume-rc-test"
+	store, err := resume.Open(ctx, meta.JobID)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, store.Close(false))
+	}()
+
+	initialScan := resume.ScanState{
+		Phase:  resume.PhaseCopySource,
+		Target: "src",
+		Frames: []resume.ScanFrame{{Dir: "", DstDir: ""}},
+	}
+	snapshot, _, err := store.LoadOrInit(meta, initialScan)
+	require.NoError(t, err)
+	now := time.Now()
+	snapshot, err = store.CommitFailure(resume.FailureCommit{
+		Failed: resume.FailedRecord{
+			WorkKey:       "copy:file1",
+			Op:            "copy",
+			Kind:          "object",
+			SrcRemote:     "file1",
+			DstRemote:     "file1",
+			Name:          "file1",
+			Size:          5,
+			What:          "transferring",
+			FirstFailedAt: now,
+			LastFailedAt:  now,
+			LastError:     "boom",
+		},
+		Scan:         snapshot.Scan,
+		Event:        resume.HistoryEvent{Kind: "failure", Name: "file1", Error: "boom", StartedAt: now, CompletedAt: now},
+		HistoryLimit: 10,
+	})
+	require.NoError(t, err)
+
+	out, err := call.Fn(ctx, rc.Params{"jobId": meta.JobID})
+	require.NoError(t, err)
+	assert.Equal(t, meta.JobID, out["jobId"])
+	assert.Equal(t, true, out["found"])
+	failed, ok := out["failed"].([]resume.FailedRecord)
+	require.True(t, ok)
+	require.Len(t, failed, 1)
+	assert.Equal(t, "file1", failed[0].Name)
+
+	clearOut, err := clearCall.Fn(ctx, rc.Params{"jobId": meta.JobID})
+	require.NoError(t, err)
+	assert.Equal(t, true, clearOut["found"])
+	assert.Equal(t, true, clearOut["cleared"])
+
+	out, err = call.Fn(ctx, rc.Params{"jobId": meta.JobID})
+	require.NoError(t, err)
+	assert.Equal(t, false, out["found"])
 }

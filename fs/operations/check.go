@@ -211,6 +211,9 @@ func (c *checkMarch) Match(ctx context.Context, dst, src fs.DirEntry) (recurse b
 // it also returns whether it couldn't be hashed
 func CheckFn(ctx context.Context, opt *CheckOpt) error {
 	ci := fs.GetConfig(ctx)
+	if ci.Resume {
+		return fserrors.FatalError(errors.New("--resume currently supports copy only"))
+	}
 	if opt.Check == nil {
 		return errors.New("internal error: nil check function")
 	}

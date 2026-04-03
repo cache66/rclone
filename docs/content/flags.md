@@ -45,6 +45,11 @@ Flags for anything which can copy a file.
       --order-by string                             Instructions on how to order the transfers, e.g. 'size,descending'
       --partial-suffix string                       Add partial-suffix to temporary file name when --inplace is not used (default ".partial")
       --refresh-times                               Refresh the modtime of remote files
+      --resume                                      Enable resumable copy execution with persisted scan state, counters, and failed items. V1 supports copy only.
+      --resume-error-limit int                      Maximum number of distinct pending failed items to keep before resume copy stops. -1 means unlimited. (default -1)
+      --resume-error-limit-action continue|fail     Deprecated for resume copy V1. Exceeding --resume-error-limit stops the job regardless of this setting. (default continue)
+      --resume-history-limit int                    Maximum number of recent success/failure events to persist for restored copy progress and logs. (default 100)
+      --resume-id string                            Identifier for the persisted copy resume state. Empty uses a derived ID from the command and remotes.
       --server-side-across-configs                  Allow server-side operations (e.g. copy) to work across different configs
       --size-only                                   Skip based on size only, not modtime or checksum
       --streaming-upload-cutoff SizeSuffix          Cutoff for switching to chunked upload if file size is unknown, upload starts after reaching cutoff or when file ends (default 100Ki)

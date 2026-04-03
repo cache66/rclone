@@ -7,6 +7,8 @@ import (
 	"crypto/md5"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path"
 	"strings"
 	"testing"
@@ -18,10 +20,13 @@ import (
 	"github.com/aws/smithy-go"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/cache"
+	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/fs/hash"
+	"github.com/rclone/rclone/fs/resume"
 	"github.com/rclone/rclone/fstest"
 	"github.com/rclone/rclone/fstest/fstests"
 	"github.com/rclone/rclone/lib/bucket"
+	"github.com/rclone/rclone/lib/pacer"
 	"github.com/rclone/rclone/lib/random"
 	"github.com/rclone/rclone/lib/version"
 	"github.com/stretchr/testify/assert"
@@ -289,6 +294,153 @@ func TestRemoveAWSChunked(t *testing.T) {
 	}
 }
 
+func TestS3ResumeListDirUsesContinuationToken(t *testing.T) {
+	var seenTokens []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenTokens = append(seenTokens, r.URL.Query().Get("continuation-token"))
+		require.Equal(t, "/bucket", r.URL.Path)
+		w.Header().Set("Content-Type", "application/xml")
+		_, err := fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>bucket</Name>
+  <Prefix></Prefix>
+  <KeyCount>2</KeyCount>
+  <MaxKeys>1000</MaxKeys>
+  <IsTruncated>true</IsTruncated>
+  <NextContinuationToken>token-2</NextContinuationToken>
+  <CommonPrefixes>
+    <Prefix>dir/</Prefix>
+  </CommonPrefixes>
+  <Contents>
+    <Key>file.txt</Key>
+    <LastModified>2024-01-02T03:04:05.000Z</LastModified>
+    <ETag>&quot;etag&quot;</ETag>
+    <Size>4</Size>
+    <StorageClass>STANDARD</StorageClass>
+  </Contents>
+</ListBucketResult>`)
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	f := newResumeListTestFs(t, ctx, server, func(opt *Options) {
+		opt.ListChunk = 1000
+		opt.ListVersion = 2
+	})
+
+	entries, nextToken, tokenAccepted, err := f.ResumeListDir(ctx, "", "token-1")
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	assert.Equal(t, []string{"token-1"}, seenTokens)
+	assert.True(t, tokenAccepted)
+	assert.Equal(t, "token-2", nextToken)
+	assert.Equal(t, "dir", entries[0].Remote())
+	assert.Equal(t, "file.txt", entries[1].Remote())
+}
+
+func TestS3ResumeListDirFallsBackWhenContinuationTokenInvalid(t *testing.T) {
+	var seenTokens []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token := r.URL.Query().Get("continuation-token")
+		seenTokens = append(seenTokens, token)
+		require.Equal(t, "/bucket", r.URL.Path)
+		w.Header().Set("Content-Type", "application/xml")
+		if token == "bad-token" {
+			w.WriteHeader(http.StatusBadRequest)
+			_, err := fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?>
+<Error>
+  <Code>InvalidContinuationToken</Code>
+  <Message>bad token</Message>
+  <RequestId>1</RequestId>
+  <HostId>2</HostId>
+</Error>`)
+			require.NoError(t, err)
+			return
+		}
+		_, err := fmt.Fprint(w, `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Name>bucket</Name>
+  <Prefix></Prefix>
+  <KeyCount>1</KeyCount>
+  <MaxKeys>1000</MaxKeys>
+  <IsTruncated>true</IsTruncated>
+  <NextContinuationToken>fresh-token</NextContinuationToken>
+  <Contents>
+    <Key>file.txt</Key>
+    <LastModified>2024-01-02T03:04:05.000Z</LastModified>
+    <ETag>&quot;etag&quot;</ETag>
+    <Size>4</Size>
+    <StorageClass>STANDARD</StorageClass>
+  </Contents>
+</ListBucketResult>`)
+		require.NoError(t, err)
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+	f := newResumeListTestFs(t, ctx, server, func(opt *Options) {
+		opt.ListChunk = 1000
+		opt.ListVersion = 2
+	})
+
+	entries, nextToken, tokenAccepted, err := f.ResumeListDir(ctx, "", "bad-token")
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, []string{"bad-token", ""}, seenTokens)
+	assert.False(t, tokenAccepted)
+	assert.Equal(t, "fresh-token", nextToken)
+	assert.Equal(t, "file.txt", entries[0].Remote())
+}
+
+func TestS3ResumeMetadataDoesNotAffectCopyResumeCompatibility(t *testing.T) {
+	cacheDir := t.TempDir()
+	require.NoError(t, config.SetCacheDir(cacheDir))
+
+	ctx := context.Background()
+	base := newResumeMetaTestFs("src", "bucket", Options{
+		ListChunk:        1000,
+		ListVersion:      2,
+		DirectoryMarkers: false,
+	})
+	changed := newResumeMetaTestFs("src", "bucket", Options{
+		ListChunk:        2000,
+		ListVersion:      2,
+		DirectoryMarkers: false,
+	})
+	dst := newResumeMetaTestFs("dst", "bucket", Options{
+		ListChunk:        1000,
+		ListVersion:      2,
+		DirectoryMarkers: false,
+	})
+
+	assert.NotEqual(t, base.ResumeMetadata(), changed.ResumeMetadata())
+
+	meta := resume.NewMeta(ctx, "copy", base, dst)
+	meta.JobID = "s3-resume-meta"
+	initialScan := resume.ScanState{
+		Phase:  resume.PhaseCopySource,
+		Target: "src",
+		Frames: []resume.ScanFrame{{Dir: ""}},
+	}
+
+	store, err := resume.Open(ctx, meta.JobID)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, store.Close(true))
+	}()
+
+	_, _, err = store.LoadOrInit(meta, initialScan)
+	require.NoError(t, err)
+
+	compatible := resume.NewMeta(ctx, "copy", changed, dst)
+	compatible.JobID = meta.JobID
+	snapshot, created, err := store.LoadOrInit(compatible, initialScan)
+	require.NoError(t, err)
+	assert.False(t, created)
+	assert.Equal(t, meta.JobID, snapshot.Meta.JobID)
+}
+
 func (f *Fs) InternalTestVersions(t *testing.T) {
 	ctx := context.Background()
 
@@ -505,3 +657,52 @@ func (f *Fs) InternalTest(t *testing.T) {
 }
 
 var _ fstests.InternalTester = (*Fs)(nil)
+
+func newResumeListTestFs(t *testing.T, ctx context.Context, server *httptest.Server, mutate func(*Options)) *Fs {
+	t.Helper()
+	ctx, ci := fs.AddConfig(ctx)
+	ci.LowLevelRetries = 1
+
+	opt := Options{
+		Provider:        "AWS",
+		Region:          "us-east-1",
+		Endpoint:        server.URL,
+		ForcePathStyle:  true,
+		AccessKeyID:     "test-access-key",
+		SecretAccessKey: "test-secret-key",
+	}
+	if mutate != nil {
+		mutate(&opt)
+	}
+
+	client, _, err := s3Connection(ctx, &opt, server.Client())
+	require.NoError(t, err)
+
+	return &Fs{
+		name:          "test-s3",
+		root:          "bucket",
+		opt:           opt,
+		ci:            ci,
+		ctx:           ctx,
+		c:             client,
+		rootBucket:    "bucket",
+		rootDirectory: "",
+		cache:         bucket.NewCache(),
+		pacer:         fs.NewPacer(ctx, pacer.NewS3(pacer.MinSleep(minSleep))),
+		srv:           server.Client(),
+	}
+}
+
+func newResumeMetaTestFs(name, root string, opt Options) *Fs {
+	ctx := context.Background()
+	return &Fs{
+		name:          name,
+		root:          root,
+		opt:           opt,
+		ci:            fs.GetConfig(ctx),
+		ctx:           ctx,
+		rootBucket:    root,
+		rootDirectory: "",
+		cache:         bucket.NewCache(),
+	}
+}

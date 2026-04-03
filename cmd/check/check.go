@@ -76,6 +76,12 @@ you what happened to it. These are reminiscent of diff files.
 The default number of parallel checks is 8. See the [--checkers](/docs/#checkers-int)
 option for more information.`, "|", "`")
 
+var ResumeHelp = strings.ReplaceAll(`
+
+**Note**: The |--resume| flag is not supported by |check| in this version.
+Resume V1 currently supports |copy| only.
+`, "|", "`")
+
 // GetCheckOpt gets the options corresponding to the check flags
 func GetCheckOpt(fsrc, fdst fs.Fs) (opt *operations.CheckOpt, close func(), err error) {
 	closers := []io.Closer{}
@@ -155,7 +161,7 @@ to check all the data.
 
 If you supply the |--checkfile HASH| flag with a valid hash name,
 the |source:path| must point to a text file in the SUM format.
-`, "|", "`") + FlagsHelp,
+`, "|", "`") + FlagsHelp + ResumeHelp,
 	Annotations: map[string]string{
 		"groups": "Filter,Listing,Check",
 	},
