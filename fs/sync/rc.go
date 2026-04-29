@@ -2,7 +2,9 @@ package sync
 
 import (
 	"context"
+	"fmt"
 
+	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/rc"
 	"github.com/rclone/rclone/fs/resume"
 )
@@ -10,8 +12,13 @@ import (
 func init() {
 	for _, name := range []string{"sync", "copy", "move"} {
 		moveHelp := ""
+		resumeHelp := ""
 		if name == "move" {
 			moveHelp = "- deleteEmptySrcDirs - delete empty src directories if set\n"
+		}
+		if name == "copy" {
+			resumeHelp = "- resume - enable Resume V1 for copy (boolean, optional)\n" +
+				"- resumeId - explicit Resume V1 job ID for copy (string, optional)\n"
 		}
 		rc.Add(rc.Call{
 			Path:         "sync/" + name,
@@ -25,7 +32,7 @@ func init() {
 - srcFs - a remote name string e.g. "drive:src" for the source
 - dstFs - a remote name string e.g. "drive:dst" for the destination
 - createEmptySrcDirs - create empty src directories on destination if set
-` + moveHelp + `
+` + moveHelp + resumeHelp + `
 
 See the [` + name + `](/commands/rclone_` + name + `/) command for more information on the above.`,
 		})
@@ -41,6 +48,7 @@ See the [` + name + `](/commands/rclone_` + name + `/) command for more informat
 Supply either:
 
 - jobId - explicit resume job ID
+- resumeId - explicit resume job ID
 
 or:
 
@@ -60,6 +68,7 @@ When srcFs and dstFs are supplied, the job ID is derived the same way as copy re
 Supply either:
 
 - jobId - explicit resume job ID
+- resumeId - explicit resume job ID
 
 or:
 
@@ -82,6 +91,10 @@ func rcSyncCopyMove(ctx context.Context, in rc.Params, name string) (out rc.Para
 	if rc.NotErrParamNotFound(err) {
 		return nil, err
 	}
+	ctx, err = rcApplyResumeParams(ctx, in, name)
+	if err != nil {
+		return nil, err
+	}
 	switch name {
 	case "sync":
 		return nil, Sync(ctx, dstFs, srcFs, createEmptySrcDirs)
@@ -95,6 +108,29 @@ func rcSyncCopyMove(ctx context.Context, in rc.Params, name string) (out rc.Para
 		return nil, MoveDir(ctx, dstFs, srcFs, deleteEmptySrcDirs, createEmptySrcDirs)
 	}
 	panic("unknown rcSyncCopyMove type")
+}
+
+func rcApplyResumeParams(ctx context.Context, in rc.Params, name string) (context.Context, error) {
+	resumeEnabled, err := in.GetBool("resume")
+	if rc.NotErrParamNotFound(err) {
+		return nil, err
+	}
+	resumeID, err := in.GetString("resumeId")
+	if rc.NotErrParamNotFound(err) {
+		return nil, err
+	}
+	if !resumeEnabled && resumeID == "" {
+		return ctx, nil
+	}
+	if name != "copy" {
+		return nil, fmt.Errorf("resume parameters are supported for sync/copy only when calling copy")
+	}
+	ctx, ci := fs.AddConfig(ctx)
+	ci.Resume = true
+	if resumeID != "" {
+		ci.ResumeID = resumeID
+	}
+	return ctx, nil
 }
 
 func rcResumeStatus(ctx context.Context, in rc.Params) (out rc.Params, err error) {
@@ -167,6 +203,13 @@ func rcResumeClear(ctx context.Context, in rc.Params) (out rc.Params, err error)
 
 func rcResumeJobID(ctx context.Context, in rc.Params) (string, error) {
 	jobID, err := in.GetString("jobId")
+	if err == nil {
+		return jobID, nil
+	}
+	if rc.NotErrParamNotFound(err) {
+		return "", err
+	}
+	jobID, err = in.GetString("resumeId")
 	if err == nil {
 		return jobID, nil
 	}

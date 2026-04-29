@@ -2396,6 +2396,239 @@ func (f *Fs) listDir(ctx context.Context, bucket, directory, prefix string, addB
 	return nil
 }
 
+func (f *Fs) ResumeMetadata() string {
+	return fmt.Sprintf(
+		"list_chunk=%d|list_version=%d|list_url_encode=%s|versions=%t|version_at=%s|version_deleted=%t|directory_markers=%t",
+		f.opt.ListChunk,
+		f.opt.ListVersion,
+		f.opt.ListURLEncode.String(),
+		f.opt.Versions,
+		time.Time(f.opt.VersionAt).UTC().Format(time.RFC3339Nano),
+		f.opt.VersionDeleted,
+		f.opt.DirectoryMarkers,
+	)
+}
+
+// ResumeListDir lists at most one directory page and returns the token needed
+// to resume from the next page. If the supplied token is no longer valid, it
+// transparently falls back to the start of the directory and reports that the
+// token wasn't accepted.
+func (f *Fs) ResumeListDir(ctx context.Context, dir, continuationToken string) (entries fs.DirEntries, nextContinuationToken string, tokenAccepted bool, err error) {
+	bucketName, directory := f.split(dir)
+	if bucketName == "" {
+		if directory != "" {
+			return nil, "", continuationToken == "", fs.ErrorListBucketRequired
+		}
+		entries, err = f.listBuckets(ctx)
+		if err != nil {
+			return nil, "", continuationToken == "", err
+		}
+		slices.SortStableFunc(entries, func(a, b fs.DirEntry) int {
+			return strings.Compare(a.Remote(), b.Remote())
+		})
+		return entries, "", continuationToken == "", nil
+	}
+	if f.opt.Versions || f.opt.VersionAt.IsSet() || f.opt.VersionDeleted {
+		err = f.listDir(ctx, bucketName, directory, f.rootDirectory, f.rootBucket == "", func(entry fs.DirEntry) error {
+			entries = append(entries, entry)
+			return nil
+		})
+		return entries, "", continuationToken == "", err
+	}
+	return f.resumeListDirPage(ctx, bucketName, directory, f.rootDirectory, f.rootBucket == "", continuationToken)
+}
+
+func (f *Fs) resumeListDirPage(ctx context.Context, bucketName, directory, prefix string, addBucket bool, continuationToken string) (entries fs.DirEntries, nextContinuationToken string, tokenAccepted bool, err error) {
+	tokenAccepted = true
+	if prefix != "" {
+		prefix += "/"
+	}
+	if directory != "" && (prefix == "" && !bucket.IsAllSlashes(directory) || prefix != "" && !strings.HasSuffix(directory, "/")) {
+		directory += "/"
+	}
+
+	urlEncodeListings := f.opt.ListURLEncode.Value
+retry:
+	delimiter := "/"
+	req := s3.ListObjectsV2Input{
+		Bucket:    &bucketName,
+		Delimiter: &delimiter,
+		Prefix:    &directory,
+		MaxKeys:   &f.opt.ListChunk,
+	}
+	if f.opt.RequesterPays {
+		req.RequestPayer = types.RequestPayerRequester
+	}
+	if continuationToken != "" {
+		switch f.opt.ListVersion {
+		case 1:
+			// Marker is carried in the same persisted field for v1 listings.
+		default:
+			req.ContinuationToken = &continuationToken
+		}
+	}
+
+	var listBucket bucketLister
+	switch f.opt.ListVersion {
+	case 1:
+		listBucket = f.newV1List(&req)
+		if continuationToken != "" {
+			ls := listBucket.(*v1List)
+			ls.req.Marker = &continuationToken
+		}
+	default:
+		listBucket = f.newV2List(&req)
+	}
+
+	var (
+		resp       *s3.ListObjectsV2Output
+		versionIDs []*string
+	)
+	err = f.pacer.Call(func() (bool, error) {
+		listBucket.URLEncodeListings(urlEncodeListings)
+		resp, versionIDs, err = listBucket.List(ctx)
+		if err != nil && !urlEncodeListings {
+			var xmlErr *xml.SyntaxError
+			if errors.As(err, &xmlErr) {
+				urlEncodeListings = true
+				fs.Debugf(f, "Retrying listing because of characters which can't be XML encoded")
+				return true, err
+			}
+		}
+		return f.shouldRetry(ctx, err)
+	})
+	if err != nil {
+		if continuationToken != "" && resumeContinuationTokenFallback(err) {
+			continuationToken = ""
+			tokenAccepted = false
+			goto retry
+		}
+		if getHTTPStatusCode(err) == http.StatusNotFound {
+			err = fs.ErrorDirNotFound
+		}
+		if f.rootBucket == "" && getHTTPStatusCode(err) == http.StatusMovedPermanently {
+			fs.Errorf(f, "Can't change region for bucket %q with no bucket specified", bucketName)
+			return nil, "", tokenAccepted, nil
+		}
+		return nil, "", tokenAccepted, err
+	}
+
+	foundItems := 0
+	for _, commonPrefix := range resp.CommonPrefixes {
+		if commonPrefix.Prefix == nil {
+			fs.Logf(f, "Nil common prefix received")
+			continue
+		}
+		remote := *commonPrefix.Prefix
+		if urlEncodeListings {
+			remote, err = url.QueryUnescape(remote)
+			if err != nil {
+				fs.Logf(f, "failed to URL decode %q in listing common prefix: %v", *commonPrefix.Prefix, err)
+				continue
+			}
+		}
+		remote = f.opt.Enc.ToStandardPath(remote)
+		if !strings.HasPrefix(remote, prefix) {
+			fs.Logf(f, "Odd directory name received %q", remote)
+			continue
+		}
+		remote = remote[len(prefix):]
+		remote, _ = strings.CutSuffix(remote, "/")
+		if remote == "" || bucket.IsAllSlashes(remote) {
+			remote += "/"
+		}
+		if addBucket {
+			remote = bucket.Join(bucketName, remote)
+		}
+		entry, entryErr := f.itemToDirEntry(ctx, remote, &types.Object{Key: &remote}, nil, true)
+		if entryErr != nil {
+			return nil, "", tokenAccepted, entryErr
+		}
+		entries = append(entries, entry)
+		foundItems++
+	}
+	for i, object := range resp.Contents {
+		remote := *stringClone(deref(object.Key))
+		if urlEncodeListings {
+			remote, err = url.QueryUnescape(remote)
+			if err != nil {
+				fs.Logf(f, "failed to URL decode %q in listing: %v", deref(object.Key), err)
+				continue
+			}
+		}
+		remote = f.opt.Enc.ToStandardPath(remote)
+		if !strings.HasPrefix(remote, prefix) {
+			fs.Logf(f, "Odd name received %q", remote)
+			continue
+		}
+		isDirectory := (remote == "" || strings.HasSuffix(remote, "/")) && object.Size != nil && *object.Size == 0
+		if isDirectory {
+			if remote == f.opt.Enc.ToStandardPath(directory) {
+				continue
+			}
+		}
+		remote = remote[len(prefix):]
+		if isDirectory {
+			remote, _ = strings.CutSuffix(remote, "/")
+		}
+		if addBucket {
+			remote = bucket.Join(bucketName, remote)
+		}
+		entry, entryErr := f.itemToDirEntry(ctx, remote, &object, versionIDsAt(versionIDs, i), isDirectory)
+		if entryErr != nil {
+			return nil, "", tokenAccepted, entryErr
+		}
+		if entry != nil {
+			entries = append(entries, entry)
+			foundItems++
+		}
+	}
+
+	if deref(resp.IsTruncated) {
+		switch ls := listBucket.(type) {
+		case *v1List:
+			nextContinuationToken = deref(ls.req.Marker)
+		case *v2List:
+			nextContinuationToken = deref(ls.req.ContinuationToken)
+		}
+	}
+	if f.opt.DirectoryMarkers && foundItems == 0 && directory != "" && nextContinuationToken == "" {
+		req := s3.HeadObjectInput{
+			Bucket: &bucketName,
+			Key:    &directory,
+		}
+		_, err = f.headObject(ctx, &req)
+		if err != nil {
+			if err == fs.ErrorObjectNotFound {
+				return nil, "", tokenAccepted, fs.ErrorDirNotFound
+			}
+			return nil, "", tokenAccepted, err
+		}
+	}
+	f.cache.MarkOK(bucketName)
+	return entries, nextContinuationToken, tokenAccepted, nil
+}
+
+func resumeContinuationTokenFallback(err error) bool {
+	var awsError smithy.APIError
+	if !errors.As(err, &awsError) {
+		return false
+	}
+	switch awsError.ErrorCode() {
+	case "InvalidArgument", "InvalidToken", "InvalidContinuationToken", "InvalidMarker":
+		return true
+	default:
+		return false
+	}
+}
+
+func versionIDsAt(versionIDs []*string, i int) *string {
+	if len(versionIDs) == 0 || i >= len(versionIDs) {
+		return nil
+	}
+	return versionIDs[i]
+}
+
 // listBuckets lists the buckets to out
 func (f *Fs) listBuckets(ctx context.Context) (entries fs.DirEntries, err error) {
 	req := s3.ListBucketsInput{}

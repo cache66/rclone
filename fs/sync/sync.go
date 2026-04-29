@@ -1366,6 +1366,9 @@ func runSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.Delete
 	if err != nil {
 		return err
 	}
+	if do.ci.Resume {
+		return do.resumeRun()
+	}
 	return do.run()
 }
 

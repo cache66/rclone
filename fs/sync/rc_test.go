@@ -51,6 +51,35 @@ func TestRcCopy(t *testing.T) {
 	r.CheckRemoteItems(t, file1, file2, file3)
 }
 
+func TestRcCopyWithResumeParams(t *testing.T) {
+	require.NoError(t, config.SetCacheDir(t.TempDir()))
+	r, call := rcNewRun(t, "sync/copy")
+	r.Mkdir(context.Background(), r.Fremote)
+
+	file1 := r.WriteBoth(context.Background(), "file1", "file1 contents", t1)
+	file2 := r.WriteFile("subdir/file2", "file2 contents", t2)
+
+	in := rc.Params{
+		"srcFs":    r.LocalName,
+		"dstFs":    r.FremoteName,
+		"resume":   true,
+		"resumeId": "resume-rc-copy",
+	}
+	out, err := call.Fn(context.Background(), in)
+	require.NoError(t, err)
+	assert.Equal(t, rc.Params(nil), out)
+
+	r.CheckLocalItems(t, file1, file2)
+	r.CheckRemoteItems(t, file1, file2)
+
+	statusCall := rc.Calls.Get("sync/resume/status")
+	require.NotNil(t, statusCall)
+	statusOut, err := statusCall.Fn(context.Background(), rc.Params{"resumeId": "resume-rc-copy"})
+	require.NoError(t, err)
+	assert.Equal(t, "resume-rc-copy", statusOut["jobId"])
+	assert.Equal(t, false, statusOut["found"])
+}
+
 // sync/move: move a directory from source remote to destination remote
 func TestRcMove(t *testing.T) {
 	r, call := rcNewRun(t, "sync/move")
@@ -97,6 +126,33 @@ func TestRcSync(t *testing.T) {
 
 	r.CheckLocalItems(t, file1, file2)
 	r.CheckRemoteItems(t, file1, file2)
+}
+
+func TestRcApplyResumeParams(t *testing.T) {
+	ctx, err := rcApplyResumeParams(context.Background(), rc.Params{
+		"resume":   true,
+		"resumeId": "resume-apply-test",
+	}, "copy")
+	require.NoError(t, err)
+	ci := fs.GetConfig(ctx)
+	assert.True(t, ci.Resume)
+	assert.Equal(t, "resume-apply-test", ci.ResumeID)
+
+	ctx, err = rcApplyResumeParams(context.Background(), rc.Params{
+		"resumeId": "resume-id-only",
+	}, "copy")
+	require.NoError(t, err)
+	ci = fs.GetConfig(ctx)
+	assert.True(t, ci.Resume)
+	assert.Equal(t, "resume-id-only", ci.ResumeID)
+}
+
+func TestRcApplyResumeParamsRejectsNonCopy(t *testing.T) {
+	_, err := rcApplyResumeParams(context.Background(), rc.Params{"resume": true}, "sync")
+	require.EqualError(t, err, "resume parameters are supported for sync/copy only when calling copy")
+
+	_, err = rcApplyResumeParams(context.Background(), rc.Params{"resumeId": "resume-nope"}, "move")
+	require.EqualError(t, err, "resume parameters are supported for sync/copy only when calling copy")
 }
 
 func TestRcResumeStatusAndClear(t *testing.T) {
@@ -178,6 +234,11 @@ func TestRcResumeStatusWithoutState(t *testing.T) {
 	failed, ok := out["failed"].([]resume.FailedRecord)
 	require.True(t, ok)
 	assert.Nil(t, failed)
+
+	out, err = call.Fn(context.Background(), rc.Params{"resumeId": "missing-job"})
+	require.NoError(t, err)
+	assert.Equal(t, "missing-job", out["jobId"])
+	assert.Equal(t, false, out["found"])
 }
 
 func TestRcResumeStatusAndClearDerivedJobID(t *testing.T) {
