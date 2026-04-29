@@ -52,4 +52,10 @@ func TestRestoreAccounting(t *testing.T) {
 
 	transferred := stats.Transferred()
 	assert.Len(t, transferred, 2)
+
+	remote, err := stats.RemoteStats(true)
+	assert.NoError(t, err)
+	speed, ok := remote["speed"].(float64)
+	assert.True(t, ok)
+	assert.Greater(t, speed, 0.0)
 }

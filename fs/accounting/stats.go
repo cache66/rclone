@@ -162,7 +162,17 @@ func (s *StatsInfo) RemoteStats(short bool) (out rc.Params, err error) {
 //
 // Call with lock held
 func (s *StatsInfo) _speed() float64 {
-	return s.average.speed
+	if s.average.speed > 0 {
+		return s.average.speed
+	}
+	if s.bytes <= 0 || s.startTime.IsZero() {
+		return 0
+	}
+	elapsed := time.Since(s.startTime).Seconds()
+	if elapsed <= 0 {
+		return 0
+	}
+	return float64(s.bytes) / elapsed
 }
 
 // timeRange is a start and end time of a transfer
@@ -333,7 +343,7 @@ func (s *StatsInfo) calculateTransferStats() (ts transferStats) {
 	// we take it off here to avoid double counting
 	ts.totalBytes = s.transferQueueSize + s.bytes + transferringBytesTotal - transferringBytesDone
 	s.average.mu.Lock()
-	ts.speed = s.average.speed
+	ts.speed = s._speed()
 	s.average.mu.Unlock()
 	dt := s._totalDuration()
 	ts.transferTime = dt.Seconds()

@@ -50,6 +50,18 @@ func (s *StatsInfo) RestoreCounters(snapshot RestoreCountersSnapshot) {
 	if !snapshot.StartTime.IsZero() {
 		s.startTime = snapshot.StartTime
 	}
+
+	s.average.mu.Lock()
+	defer s.average.mu.Unlock()
+
+	if snapshot.Bytes > 0 && !s.startTime.IsZero() {
+		elapsed := time.Since(s.startTime).Seconds()
+		if elapsed > 0 {
+			s.average.speed = float64(snapshot.Bytes) / elapsed
+		}
+	}
+	s.average.lpTime = time.Now()
+	s.average.lpBytes = 0
 }
 
 // RestoreEventHistory injects completed transfer/check events back into the
