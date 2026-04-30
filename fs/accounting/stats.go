@@ -162,7 +162,13 @@ func (s *StatsInfo) RemoteStats(short bool) (out rc.Params, err error) {
 //
 // Call with lock held
 func (s *StatsInfo) _speed() float64 {
-	if s.average.speed > 0 {
+	if !s.average.lpTime.IsZero() && s.average.lpBytes > 0 {
+		elapsed := time.Since(s.average.lpTime).Seconds()
+		if elapsed > 0 {
+			return float64(s.average.lpBytes) / elapsed
+		}
+	}
+	if s.average.started && s.average.speed > 0 {
 		return s.average.speed
 	}
 	if s.bytes <= 0 || s.startTime.IsZero() {
