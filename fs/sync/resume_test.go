@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -109,6 +111,30 @@ func TestCopyDirResumeSkipsDoneAndRestoresCounters(t *testing.T) {
 	assert.Equal(t, int64(2), accounting.GlobalStats().GetTransfers())
 	assert.Equal(t, "done", readCopyResumeFile(t, dstDir, "done.txt"))
 	assert.Equal(t, "pend", readCopyResumeFile(t, dstDir, "pending.txt"))
+}
+
+func TestCopyDirResumeReusesDestinationListingAcrossSourcePages(t *testing.T) {
+	ctx := newCopyResumeTestContext(t, "copy-resume-dst-list-cache", 1)
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+
+	writeCopyResumeFile(t, srcDir, "a.txt", "a")
+	writeCopyResumeFile(t, srcDir, "b.txt", "b")
+	writeCopyResumeFile(t, srcDir, "c.txt", "c")
+	writeCopyResumeFile(t, srcDir, "d.txt", "d")
+
+	baseSrc := newCopyResumeLocalFs(t, ctx, srcDir)
+	fsrc := &copyResumePagedSourceFs{Fs: baseSrc, pageSize: 2}
+	fdst := &copyResumeCountingFs{Fs: newCopyResumeLocalFs(t, ctx, dstDir)}
+
+	accounting.GlobalStats().ResetCounters()
+	defer accounting.GlobalStats().ResetCounters()
+
+	err := CopyDir(ctx, fdst, fsrc, false)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), fdst.listCalls.Load())
+	assert.Equal(t, "a", readCopyResumeFile(t, dstDir, "a.txt"))
+	assert.Equal(t, "d", readCopyResumeFile(t, dstDir, "d.txt"))
 }
 
 func TestCopyDirResumeRestoresDeepDirectoryStack(t *testing.T) {
@@ -779,6 +805,48 @@ type copyResumeProbe struct {
 	active atomic.Int32
 	max    atomic.Int32
 	delay  time.Duration
+}
+
+type copyResumeCountingFs struct {
+	fs.Fs
+	listCalls atomic.Int32
+}
+
+func (f *copyResumeCountingFs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
+	f.listCalls.Add(1)
+	return f.Fs.List(ctx, dir)
+}
+
+type copyResumePagedSourceFs struct {
+	fs.Fs
+	pageSize int
+}
+
+func (f *copyResumePagedSourceFs) ResumeListDir(ctx context.Context, dir, continuationToken string) (entries fs.DirEntries, nextContinuationToken string, tokenAccepted bool, err error) {
+	entries, err = f.Fs.List(ctx, dir)
+	if err != nil {
+		return nil, "", false, err
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].Remote() < entries[j].Remote()
+	})
+	start := 0
+	if continuationToken != "" {
+		start, err = strconv.Atoi(continuationToken)
+		if err != nil {
+			return nil, "", false, err
+		}
+	}
+	if start >= len(entries) {
+		return nil, "", true, nil
+	}
+	end := start + f.pageSize
+	if end > len(entries) {
+		end = len(entries)
+	} else {
+		nextContinuationToken = strconv.Itoa(end)
+	}
+	return append(fs.DirEntries(nil), entries[start:end]...), nextContinuationToken, true, nil
 }
 
 type copyResumeFailingFs struct {

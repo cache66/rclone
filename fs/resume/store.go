@@ -36,6 +36,12 @@ type SuccessCommit struct {
 	HistoryLimit int
 }
 
+// SuccessBatchCommit describes a group of completed work items that can be
+// persisted with a single snapshot rewrite.
+type SuccessBatchCommit struct {
+	Commits []SuccessCommit
+}
+
 // FailureCommit describes the data written when a work item failed.
 type FailureCommit struct {
 	Failed       FailedRecord
@@ -183,11 +189,45 @@ func (s *Store) CommitSuccess(commit SuccessCommit) (snapshot Snapshot, err erro
 	return snapshot, err
 }
 
+// CommitSuccessBatch persists multiple completed work items while rewriting the
+// snapshot only once. This dramatically reduces resume bookkeeping overhead for
+// healthy small-object workloads.
+func (s *Store) CommitSuccessBatch(commit SuccessBatchCommit) (snapshot Snapshot, err error) {
+	if len(commit.Commits) == 0 {
+		return s.Snapshot()
+	}
+	err = s.db.Do(true, bucketOp(func(ctx context.Context, b kv.Bucket) error {
+		metaData := b.Get([]byte(s.metaKey()))
+		if len(metaData) == 0 {
+			return kv.ErrEmpty
+		}
+		if err := snapshot.loadExisting(s, metaData, b); err != nil {
+			return err
+		}
+		for _, item := range commit.Commits {
+			if err := s.applySuccessLocked(b, item, &snapshot); err != nil {
+				return err
+			}
+		}
+		return s.writeSnapshotLocked(b, snapshot)
+	}))
+	if errors.Is(err, kv.ErrEmpty) {
+		return Snapshot{}, nil
+	}
+	return snapshot, err
+}
+
 func (s *Store) commitSuccessLocked(b kv.Bucket, commit SuccessCommit, snapshot *Snapshot) error {
 	if err := snapshot.loadExisting(s, b.Get([]byte(s.metaKey())), b); err != nil {
 		return err
 	}
+	if err := s.applySuccessLocked(b, commit, snapshot); err != nil {
+		return err
+	}
+	return s.writeSnapshotLocked(b, *snapshot)
+}
 
+func (s *Store) applySuccessLocked(b kv.Bucket, commit SuccessCommit, snapshot *Snapshot) error {
 	doneExists := len(b.Get([]byte(s.doneKey(commit.Done.WorkKey)))) != 0
 	failedKey := s.failedKey(commit.Done.WorkKey)
 	failedExists := len(b.Get([]byte(failedKey))) != 0
@@ -224,7 +264,7 @@ func (s *Store) commitSuccessLocked(b kv.Bucket, commit SuccessCommit, snapshot 
 	}
 
 	snapshot.Scan = commit.Scan
-	return s.writeSnapshotLocked(b, *snapshot)
+	return nil
 }
 
 // CommitFailure persists or updates a failed work item, updates error

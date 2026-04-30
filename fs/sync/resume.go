@@ -12,6 +12,11 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+const (
+	resumeCopyCommitBatchSize     = 1000
+	resumeCopyCommitBatchInterval = 5 * time.Second
+)
+
 func (s *syncCopyMove) resumeRun() error {
 	if err := s.resumeValidate(); err != nil {
 		return err
@@ -39,7 +44,7 @@ func (s *syncCopyMove) resumeRun() error {
 			DstDir: s.dir,
 		}},
 	}
-	snapshot, _, err := store.LoadOrInit(meta, initialScan)
+	snapshot, created, err := store.LoadOrInit(meta, initialScan)
 	if err != nil {
 		return err
 	}
@@ -56,7 +61,7 @@ func (s *syncCopyMove) resumeRun() error {
 	if err = s.retryResumeFailures(store, &snapshot); err != nil {
 		return err
 	}
-	if err = s.runResumeSourceScan(store, &snapshot); err != nil {
+	if err = s.runResumeSourceScan(store, &snapshot, created); err != nil {
 		return err
 	}
 
@@ -209,9 +214,13 @@ func (s *syncCopyMove) runRetryResumeFailure(record resume.FailedRecord) resumeC
 	return resumeCopyRetryResult{done: done}
 }
 
-func (s *syncCopyMove) runResumeSourceScan(store *resume.Store, snapshot *resume.Snapshot) error {
+func (s *syncCopyMove) runResumeSourceScan(store *resume.Store, snapshot *resume.Snapshot, skipDoneLookup bool) error {
 	keyer := resume.NewMatchKeyer(s.ctx, s.fdst)
 	frames := snapshot.Scan.Frames
+	type dstDirListing struct {
+		byKey map[string]fs.DirEntry
+	}
+	dstListings := make(map[string]dstDirListing)
 	if len(frames) == 0 {
 		frames = []resume.ScanFrame{{Dir: s.dir, DstDir: s.dir}}
 	}
@@ -227,16 +236,24 @@ func (s *syncCopyMove) runResumeSourceScan(store *resume.Store, snapshot *resume
 			frame.PageIndex = 0
 			pageIndex = 0
 		}
-		dstEntries, err := resume.SortedDirEntries(s.ctx, s.fdst, frame.DstDir, false, keyer.DstKey)
-		if err != nil && !errors.Is(err, fs.ErrorDirNotFound) {
-			return err
+		listingKey := frame.Dir + "\x00" + frame.DstDir
+		dstListing, ok := dstListings[listingKey]
+		if !ok {
+			dstEntries, err := resume.SortedDirEntries(s.ctx, s.fdst, frame.DstDir, false, keyer.DstKey)
+			if err != nil && !errors.Is(err, fs.ErrorDirNotFound) {
+				return err
+			}
+			if errors.Is(err, fs.ErrorDirNotFound) {
+				dstEntries = nil
+				err = nil
+			}
+			dstListing = dstDirListing{
+				byKey: resume.DirByKey(dstEntries, keyer.DstKey),
+			}
+			dstListings[listingKey] = dstListing
 		}
-		if errors.Is(err, fs.ErrorDirNotFound) {
-			dstEntries = nil
-			err = nil
-		}
-		dstByKey := resume.DirByKey(dstEntries, keyer.DstKey)
 		var batch []resumeCopyTask
+		var batchOpenedAt time.Time
 
 		descended := false
 		for entryIndex, srcEntry := range srcPage.Entries {
@@ -252,7 +269,7 @@ func (s *syncCopyMove) runResumeSourceScan(store *resume.Store, snapshot *resume
 				}
 				batch = nil
 				frame = &frames[len(frames)-1]
-				nextDstDir, dirErr := s.handleResumeDirectory(x, dstByKey[matchKey])
+				nextDstDir, dirErr := s.handleResumeDirectory(x, dstListing.byKey[matchKey])
 				if dirErr != nil {
 					return dirErr
 				}
@@ -265,7 +282,7 @@ func (s *syncCopyMove) runResumeSourceScan(store *resume.Store, snapshot *resume
 				snapshot.Scan = scan
 				descended = true
 			case fs.Object:
-				task, alreadyDone, fileErr := s.prepareResumeCopyTask(store, x, dstByKey[matchKey], cursorKey)
+				task, alreadyDone, fileErr := s.prepareResumeCopyTask(store, x, dstListing.byKey[matchKey], cursorKey, skipDoneLookup)
 				if fileErr != nil {
 					return fileErr
 				}
@@ -273,7 +290,18 @@ func (s *syncCopyMove) runResumeSourceScan(store *resume.Store, snapshot *resume
 					frame.LastDoneEntryKey = cursorKey
 					continue
 				}
+				if len(batch) == 0 {
+					batchOpenedAt = time.Now()
+				}
 				batch = append(batch, task)
+				if len(batch) >= resumeCopyCommitBatchSize || (!batchOpenedAt.IsZero() && time.Since(batchOpenedAt) >= resumeCopyCommitBatchInterval) {
+					if err = s.flushResumeCopyBatch(store, snapshot, &frames, batch); err != nil {
+						return err
+					}
+					batch = nil
+					batchOpenedAt = time.Time{}
+					frame = &frames[len(frames)-1]
+				}
 			default:
 				return fmt.Errorf("unsupported source entry %T", srcEntry)
 			}
@@ -298,6 +326,7 @@ func (s *syncCopyMove) runResumeSourceScan(store *resume.Store, snapshot *resume
 			snapshot.Scan = scan
 			continue
 		}
+		delete(dstListings, listingKey)
 		frames = frames[:len(frames)-1]
 		scan := s.resumeCopyScanState(frames, len(frames) == 0, snapshot.Totals.PendingFailedCount)
 		if err = store.SaveScan(scan); err != nil {
@@ -323,7 +352,7 @@ type resumeCopyResult struct {
 	err    error
 }
 
-func (s *syncCopyMove) prepareResumeCopyTask(store *resume.Store, src fs.Object, dstEntry fs.DirEntry, cursorKey string) (task resumeCopyTask, alreadyDone bool, err error) {
+func (s *syncCopyMove) prepareResumeCopyTask(store *resume.Store, src fs.Object, dstEntry fs.DirEntry, cursorKey string, skipDoneLookup bool) (task resumeCopyTask, alreadyDone bool, err error) {
 	targetRemote := resume.TargetRemote(s.ctx, src)
 	dstRemote := targetRemote
 	var dstObj fs.Object
@@ -334,12 +363,14 @@ func (s *syncCopyMove) prepareResumeCopyTask(store *resume.Store, src fs.Object,
 		}
 	}
 	workKey := resume.WorkKey("copy", src.Remote(), dstRemote, resume.EntryFingerprint(s.ctx, src))
-	done, err := store.HasDone(workKey)
-	if err != nil {
-		return task, false, err
-	}
-	if done {
-		return task, true, nil
+	if !skipDoneLookup {
+		done, err := store.HasDone(workKey)
+		if err != nil {
+			return task, false, err
+		}
+		if done {
+			return task, true, nil
+		}
 	}
 	return resumeCopyTask{
 		cursorKey: cursorKey,
@@ -374,6 +405,7 @@ func (s *syncCopyMove) flushResumeCopyBatch(store *resume.Store, snapshot *resum
 		return err
 	}
 
+	successCommits := make([]resume.SuccessCommit, 0, len(results))
 	for _, result := range results {
 		currentFrames := *frames
 		currentFrames[len(currentFrames)-1].LastDoneEntryKey = result.task.cursorKey
@@ -406,11 +438,17 @@ func (s *syncCopyMove) flushResumeCopyBatch(store *resume.Store, snapshot *resum
 		if result.done.Bytes > 0 || result.done.Checks > 0 {
 			historyEvent = resumeSuccessEvent(result.done)
 		}
-		newSnapshot, commitErr := store.CommitSuccess(resume.SuccessCommit{
+		successCommits = append(successCommits, resume.SuccessCommit{
 			Done:         result.done,
 			Scan:         scan,
 			Event:        historyEvent,
 			HistoryLimit: s.ci.ResumeHistoryLimit,
+		})
+	}
+
+	if len(successCommits) > 0 {
+		newSnapshot, commitErr := store.CommitSuccessBatch(resume.SuccessBatchCommit{
+			Commits: successCommits,
 		})
 		if commitErr != nil {
 			return commitErr
