@@ -444,7 +444,7 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 				// File/NAS resume now restores from the earliest uncommitted task
 				// frontier, so the hot path no longer needs per-file done lookups.
 				// This keeps restart correctness while avoiding one KV read per file.
-				task, alreadyDone, fileErr := s.prepareResumeCopyTask(store, x, dstListing.byKey[matchKey], cursorKey, nil, true)
+				task, alreadyDone, fileErr := s.prepareResumeCopyTask(store, x, dstListing.byKey[matchKey], cursorKey, nil, true, snapshot.Totals.PendingFailedCount == 0)
 				if fileErr != nil {
 					return fileErr
 				}
@@ -690,7 +690,7 @@ func (s *syncCopyMove) runResumeObjectScan(store *resume.Store, snapshot *resume
 					frame.LastDoneEntryKey = cursorKey
 					continue
 				}
-				task, _, taskErr := s.prepareResumeCopyTask(store, x, dstByKey[matchKey], cursorKey, nil, true)
+				task, _, taskErr := s.prepareResumeCopyTask(store, x, dstByKey[matchKey], cursorKey, nil, true, false)
 				if taskErr != nil {
 					return taskErr
 				}
@@ -765,7 +765,7 @@ type resumeCopyResult struct {
 	err    error
 }
 
-func (s *syncCopyMove) prepareResumeCopyTask(store *resume.Store, src fs.Object, dstEntry fs.DirEntry, cursorKey string, scanFrames []resume.ScanFrame, skipDoneLookup bool) (task resumeCopyTask, alreadyDone bool, err error) {
+func (s *syncCopyMove) prepareResumeCopyTask(store *resume.Store, src fs.Object, dstEntry fs.DirEntry, cursorKey string, scanFrames []resume.ScanFrame, skipDoneLookup, deferWorkKey bool) (task resumeCopyTask, alreadyDone bool, err error) {
 	targetRemote := resume.TargetRemote(s.ctx, src)
 	dstRemote := targetRemote
 	var dstObj fs.Object
@@ -775,7 +775,10 @@ func (s *syncCopyMove) prepareResumeCopyTask(store *resume.Store, src fs.Object,
 			dstObj = object
 		}
 	}
-	workKey := resume.WorkKey("copy", src.Remote(), dstRemote, resume.EntryFingerprint(s.ctx, src))
+	workKey := ""
+	if !deferWorkKey || !skipDoneLookup {
+		workKey = resume.WorkKey("copy", src.Remote(), dstRemote, resume.EntryFingerprint(s.ctx, src))
+	}
 	if !skipDoneLookup {
 		done, err := store.HasDone(workKey)
 		if err != nil {
@@ -1123,13 +1126,17 @@ func (s *syncCopyMove) handleResumeDirectory(src fs.Directory, dstEntry fs.DirEn
 func (s *syncCopyMove) copyResumeObject(src fs.Object, dst fs.Object, workKey string, retry bool) (resume.DoneRecord, resume.FailedRecord, error) {
 	name := src.Remote()
 	startedAt := time.Now()
+	fingerprint := ""
+	if workKey != "" {
+		fingerprint = resume.EntryFingerprint(s.ctx, src)
+	}
 	doneRecord := resume.DoneRecord{
 		WorkKey:     workKey,
 		Op:          "copy",
 		Kind:        "object",
 		SrcRemote:   src.Remote(),
 		DstRemote:   resume.TargetRemote(s.ctx, src),
-		Fingerprint: resume.EntryFingerprint(s.ctx, src),
+		Fingerprint: fingerprint,
 		Name:        name,
 		Size:        src.Size(),
 		Checked:     false,
@@ -1143,13 +1150,29 @@ func (s *syncCopyMove) copyResumeObject(src fs.Object, dst fs.Object, workKey st
 		Kind:          "object",
 		SrcRemote:     src.Remote(),
 		DstRemote:     doneRecord.DstRemote,
-		Fingerprint:   doneRecord.Fingerprint,
+		Fingerprint:   fingerprint,
 		Name:          name,
 		Size:          src.Size(),
 		Checked:       false,
 		What:          "transferring",
 		FirstFailedAt: startedAt,
 		LastFailedAt:  startedAt,
+	}
+	ensureFingerprint := func() string {
+		if fingerprint == "" {
+			fingerprint = resume.EntryFingerprint(s.ctx, src)
+			doneRecord.Fingerprint = fingerprint
+			failedRecord.Fingerprint = fingerprint
+		}
+		return fingerprint
+	}
+	ensureWorkKey := func() string {
+		if workKey == "" {
+			workKey = resume.WorkKey("copy", src.Remote(), doneRecord.DstRemote, ensureFingerprint())
+		}
+		doneRecord.WorkKey = workKey
+		failedRecord.WorkKey = workKey
+		return workKey
 	}
 
 	if !src.Storable() {
@@ -1182,6 +1205,7 @@ func (s *syncCopyMove) copyResumeObject(src fs.Object, dst fs.Object, workKey st
 	if needTransfer {
 		noNeedTransfer, err := operations.CompareOrCopyDest(s.ctx, s.fdst, dst, src, s.compareCopyDest, s.backupDir)
 		if err != nil {
+			ensureWorkKey()
 			failedRecord.LastError = err.Error()
 			return doneRecord, failedRecord, err
 		}
@@ -1204,6 +1228,7 @@ func (s *syncCopyMove) copyResumeObject(src fs.Object, dst fs.Object, workKey st
 	}
 	if s.ci.Immutable && dst != nil {
 		err := fserrors.NoRetryError(fs.ErrorImmutableModified)
+		ensureWorkKey()
 		failedRecord.LastError = err.Error()
 		return doneRecord, failedRecord, err
 	}
@@ -1211,6 +1236,7 @@ func (s *syncCopyMove) copyResumeObject(src fs.Object, dst fs.Object, workKey st
 		s.markDirModifiedObject(dst)
 		err := operations.MoveBackupDir(s.ctx, s.backupDir, dst)
 		if err != nil {
+			ensureWorkKey()
 			failedRecord.LastError = err.Error()
 			return doneRecord, failedRecord, err
 		}
@@ -1225,6 +1251,7 @@ func (s *syncCopyMove) copyResumeObject(src fs.Object, dst fs.Object, workKey st
 	}
 	_, err := operations.Copy(s.ctx, s.fdst, dst, src.Remote(), src)
 	if err != nil {
+		ensureWorkKey()
 		failedRecord.LastError = err.Error()
 		return doneRecord, failedRecord, err
 	}
