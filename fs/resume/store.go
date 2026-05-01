@@ -137,9 +137,14 @@ func (s *Store) Snapshot() (snapshot Snapshot, err error) {
 
 // SaveScan persists the current scan cursor.
 func (s *Store) SaveScan(scan ScanState) error {
-	return s.db.Do(true, bucketOp(func(ctx context.Context, b kv.Bucket) error {
+	started := time.Now()
+	err := s.db.Do(true, bucketOp(func(ctx context.Context, b kv.Bucket) error {
 		return writeJSONValue(b, s.scanKey(), scan)
 	}))
+	if err == nil {
+		recordSaveScan(time.Since(started))
+	}
+	return err
 }
 
 // HasDone reports whether the work item was already completed.
@@ -196,6 +201,7 @@ func (s *Store) CommitSuccessBatch(commit SuccessBatchCommit) (snapshot Snapshot
 	if len(commit.Commits) == 0 {
 		return s.Snapshot()
 	}
+	started := time.Now()
 	err = s.db.Do(true, bucketOp(func(ctx context.Context, b kv.Bucket) error {
 		metaData := b.Get([]byte(s.metaKey()))
 		if len(metaData) == 0 {
@@ -211,6 +217,9 @@ func (s *Store) CommitSuccessBatch(commit SuccessBatchCommit) (snapshot Snapshot
 		}
 		return s.writeSnapshotLocked(b, snapshot)
 	}))
+	if err == nil {
+		recordCommitSuccessBatch(len(commit.Commits), time.Since(started))
+	}
 	if errors.Is(err, kv.ErrEmpty) {
 		return Snapshot{}, nil
 	}

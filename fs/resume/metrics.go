@@ -1,0 +1,73 @@
+package resume
+
+import (
+	"sync/atomic"
+	"time"
+)
+
+var resumeMetrics = struct {
+	saveScanTotal               atomic.Int64
+	saveScanNanosTotal          atomic.Int64
+	commitSuccessBatchTotal     atomic.Int64
+	commitSuccessBatchItemsTotal atomic.Int64
+	commitSuccessBatchNanosTotal atomic.Int64
+	fileFrontierCommitTotal     atomic.Int64
+	fileFrontierCommittedTasks  atomic.Int64
+	fileFrontierBlockedTotal    atomic.Int64
+	fileFrontierInflight        atomic.Int64
+	fileFrontierPending         atomic.Int64
+}{}
+
+// MetricsSnapshot exposes lightweight resume diagnostics for Prometheus.
+type MetricsSnapshot struct {
+	SaveScanTotal                int64
+	SaveScanSecondsTotal         float64
+	CommitSuccessBatchTotal      int64
+	CommitSuccessBatchItemsTotal int64
+	CommitSuccessBatchSecondsTotal float64
+	FileFrontierCommitTotal      int64
+	FileFrontierCommittedTasks   int64
+	FileFrontierBlockedTotal     int64
+	FileFrontierInflight         int64
+	FileFrontierPending          int64
+}
+
+// Metrics returns a copy of the current process-wide resume diagnostics.
+func Metrics() MetricsSnapshot {
+	return MetricsSnapshot{
+		SaveScanTotal:                  resumeMetrics.saveScanTotal.Load(),
+		SaveScanSecondsTotal:           float64(resumeMetrics.saveScanNanosTotal.Load()) / float64(time.Second),
+		CommitSuccessBatchTotal:        resumeMetrics.commitSuccessBatchTotal.Load(),
+		CommitSuccessBatchItemsTotal:   resumeMetrics.commitSuccessBatchItemsTotal.Load(),
+		CommitSuccessBatchSecondsTotal: float64(resumeMetrics.commitSuccessBatchNanosTotal.Load()) / float64(time.Second),
+		FileFrontierCommitTotal:        resumeMetrics.fileFrontierCommitTotal.Load(),
+		FileFrontierCommittedTasks:     resumeMetrics.fileFrontierCommittedTasks.Load(),
+		FileFrontierBlockedTotal:       resumeMetrics.fileFrontierBlockedTotal.Load(),
+		FileFrontierInflight:           resumeMetrics.fileFrontierInflight.Load(),
+		FileFrontierPending:            resumeMetrics.fileFrontierPending.Load(),
+	}
+}
+
+func recordSaveScan(duration time.Duration) {
+	resumeMetrics.saveScanTotal.Add(1)
+	resumeMetrics.saveScanNanosTotal.Add(duration.Nanoseconds())
+}
+
+func recordCommitSuccessBatch(items int, duration time.Duration) {
+	resumeMetrics.commitSuccessBatchTotal.Add(1)
+	resumeMetrics.commitSuccessBatchItemsTotal.Add(int64(items))
+	resumeMetrics.commitSuccessBatchNanosTotal.Add(duration.Nanoseconds())
+}
+
+// RecordFileFrontierCommit updates file-resume frontier diagnostics.
+func RecordFileFrontierCommit(committedTasks, pending, inflight int, blocked bool) {
+	if committedTasks > 0 {
+		resumeMetrics.fileFrontierCommitTotal.Add(1)
+		resumeMetrics.fileFrontierCommittedTasks.Add(int64(committedTasks))
+	}
+	if blocked {
+		resumeMetrics.fileFrontierBlockedTotal.Add(1)
+	}
+	resumeMetrics.fileFrontierPending.Store(int64(pending))
+	resumeMetrics.fileFrontierInflight.Store(int64(inflight))
+}

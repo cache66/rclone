@@ -395,14 +395,6 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 			}
 			switch x := srcEntry.(type) {
 			case fs.Directory:
-				if err = dispatchTask(); err != nil {
-					return err
-				}
-				for inflightCount >= windowSize && !frontierBlocked {
-					if err = waitForOne(); err != nil {
-						return err
-					}
-				}
 				nextDstDir, dirErr := s.handleResumeDirectory(x, dstListing.byKey[matchKey])
 				if dirErr != nil {
 					return dirErr
@@ -428,11 +420,9 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 				if len(batch) == 0 {
 					batchOpenedAt = time.Now()
 					batchStartFrames = append([]resume.ScanFrame(nil), frames...)
-					batchCommitFrames = append([]resume.ScanFrame(nil), frames...)
-					batchCommitFrames[len(batchCommitFrames)-1].LastDoneEntryKey = cursorKey
-				} else if len(batchCommitFrames) > 0 {
-					batchCommitFrames[len(batchCommitFrames)-1].LastDoneEntryKey = cursorKey
 				}
+				batchCommitFrames = append([]resume.ScanFrame(nil), frames...)
+				batchCommitFrames[len(batchCommitFrames)-1].LastDoneEntryKey = cursorKey
 				batch = append(batch, task)
 				if len(batch) >= resumeCopyCommitBatchSize || (!batchOpenedAt.IsZero() && time.Since(batchOpenedAt) >= resumeCopyCommitBatchInterval) {
 					if err = dispatchTask(); err != nil {
@@ -453,14 +443,6 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 		}
 		if descended {
 			continue
-		}
-		if err = dispatchTask(); err != nil {
-			return err
-		}
-		for inflightCount >= windowSize && !frontierBlocked {
-			if err = waitForOne(); err != nil {
-				return err
-			}
 		}
 		if srcPage.NextContinuationToken != "" {
 			frame.ContinuationToken = srcPage.NextContinuationToken
@@ -895,8 +877,10 @@ func (s *syncCopyMove) commitResumeReadyFileTasks(store *resume.Store, snapshot 
 	remainingInflight = append([]resume.FileTask(nil), inflight...)
 	ready := resumeFileFrontierReady(frontierTaskID, pending)
 	if len(ready) == 0 {
+		resume.RecordFileFrontierCommit(0, len(pending), len(remainingInflight), false)
 		return nextFrontierTaskID, remainingInflight, false, nil
 	}
+	committedTasks := 0
 	popInflight := func(taskID int64) {
 		next := remainingInflight[:0]
 		for _, task := range remainingInflight {
@@ -942,6 +926,7 @@ func (s *syncCopyMove) commitResumeReadyFileTasks(store *resume.Store, snapshot 
 			nextFrontierTaskID = result.task.TaskID
 			delete(pending, result.task.TaskID)
 			popInflight(result.task.TaskID)
+			committedTasks++
 		}
 	}
 
@@ -972,6 +957,7 @@ func (s *syncCopyMove) commitResumeReadyFileTasks(store *resume.Store, snapshot 
 		if saveErr := store.SaveScan(snapshot.Scan); saveErr != nil {
 			return nextFrontierTaskID, remainingInflight, true, saveErr
 		}
+		resume.RecordFileFrontierCommit(committedTasks, len(pending), len(remainingInflight), true)
 		if result.firstFailure != nil {
 			return nextFrontierTaskID, remainingInflight, true, result.firstFailure
 		}
@@ -985,6 +971,7 @@ func (s *syncCopyMove) commitResumeReadyFileTasks(store *resume.Store, snapshot 
 	if err := store.SaveScan(snapshot.Scan); err != nil {
 		return nextFrontierTaskID, remainingInflight, false, err
 	}
+	resume.RecordFileFrontierCommit(committedTasks, len(pending), len(remainingInflight), false)
 	return nextFrontierTaskID, remainingInflight, false, nil
 }
 
