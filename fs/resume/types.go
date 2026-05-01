@@ -79,6 +79,7 @@ type ObjectSegment struct {
 	StartAfterKey string              `json:"start_after_key,omitempty"`
 	EndKey        string              `json:"end_key,omitempty"`
 	ObjectCount   int                 `json:"object_count"`
+	ByteCount     int64               `json:"byte_count,omitempty"`
 	Status        ObjectSegmentStatus `json:"status,omitempty"`
 }
 
@@ -136,6 +137,7 @@ type FileTask struct {
 	StartFrameSnapshot []FileFrame    `json:"start_frame_snapshot,omitempty"`
 	EndFile            string         `json:"end_file,omitempty"`
 	FileCount          int            `json:"file_count"`
+	ByteCount          int64          `json:"byte_count,omitempty"`
 	Status             FileTaskStatus `json:"status,omitempty"`
 }
 

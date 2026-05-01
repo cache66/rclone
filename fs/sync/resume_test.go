@@ -237,6 +237,7 @@ func TestNewResumeFileTaskCapturesTaskMetadata(t *testing.T) {
 	task := newResumeFileTask(7, tasks, startFrames, frames)
 	assert.Equal(t, int64(7), task.meta.TaskID)
 	assert.Equal(t, 2, task.meta.FileCount)
+	assert.Equal(t, int64(3), task.meta.ByteCount)
 	assert.Equal(t, "a/two.txt", task.meta.EndFile)
 	require.Len(t, task.meta.StartFrameSnapshot, 2)
 	assert.Equal(t, "", task.meta.StartFrameSnapshot[0].Dir)
@@ -244,6 +245,13 @@ func TestNewResumeFileTaskCapturesTaskMetadata(t *testing.T) {
 	assert.Equal(t, "", task.meta.StartFrameSnapshot[0].ContinuationToken)
 	assert.Equal(t, "", task.meta.StartFrameSnapshot[1].LastEntry)
 	assert.Equal(t, frames, task.commitFrames)
+}
+
+func TestResumeShouldDispatchBySize(t *testing.T) {
+	assert.False(t, resumeShouldDispatchBySize(2, 20, 3, 30))
+	assert.True(t, resumeShouldDispatchBySize(3, 20, 3, 30))
+	assert.True(t, resumeShouldDispatchBySize(2, 30, 3, 30))
+	assert.False(t, resumeShouldDispatchBySize(2000, 30, 0, 0))
 }
 
 func TestCommitResumeReadyFileTasksAdvancesContiguousFrontier(t *testing.T) {

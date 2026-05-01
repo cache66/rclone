@@ -607,6 +607,16 @@ var ConfigOptionsInfo = Options{{
 	Help:    "Maximum number of objects grouped into a single object resume segment.",
 	Groups:  "Copy",
 }, {
+	Name:    "resume_object_segment_max_bytes",
+	Default: SizeSuffix(32 * Gibi),
+	Help:    "Maximum total size of objects grouped into a single object resume segment. 0 disables the byte limit.",
+	Groups:  "Copy",
+}, {
+	Name:    "resume_file_task_max_bytes",
+	Default: SizeSuffix(32 * Gibi),
+	Help:    "Maximum total size of files grouped into a single file resume task. 0 disables the byte limit.",
+	Groups:  "Copy",
+}, {
 	Name:    "resume_success_checkpoint_interval",
 	Default: Duration(5 * time.Second),
 	Help:    "Maximum delay before flushing successful resume progress for lightweight resume execution.",
@@ -722,6 +732,8 @@ type ConfigInfo struct {
 	ResumeObjectWindowSize          int                    `config:"resume_object_window_size"`
 	ResumeFileWindowSize            int                    `config:"resume_file_window_size"`
 	ResumeObjectSegmentSize         int                    `config:"resume_object_segment_size"`
+	ResumeObjectSegmentMaxBytes     SizeSuffix             `config:"resume_object_segment_max_bytes"`
+	ResumeFileTaskMaxBytes          SizeSuffix             `config:"resume_file_task_max_bytes"`
 	ResumeSuccessCheckpointInterval Duration               `config:"resume_success_checkpoint_interval"`
 	DisableHTTPKeepAlives           bool                   `config:"disable_http_keep_alives"`
 	Metadata                        bool                   `config:"metadata"`
@@ -817,6 +829,12 @@ func (ci *ConfigInfo) Reload(ctx context.Context) error {
 	}
 	if ci.ResumeObjectSegmentSize <= 0 {
 		return fmt.Errorf("--resume-object-segment-size must be > 0")
+	}
+	if ci.ResumeObjectSegmentMaxBytes < 0 {
+		return fmt.Errorf("--resume-object-segment-max-bytes must be >= 0")
+	}
+	if ci.ResumeFileTaskMaxBytes < 0 {
+		return fmt.Errorf("--resume-file-task-max-bytes must be >= 0")
 	}
 	if ci.ResumeSuccessCheckpointInterval < 0 {
 		return fmt.Errorf("--resume-success-checkpoint-interval must be >= 0")

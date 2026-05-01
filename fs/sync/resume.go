@@ -49,6 +49,7 @@ func newResumeFileTask(taskID int64, tasks []resumeCopyTask, startFrames, commit
 	meta := resume.FileTask{
 		TaskID:    taskID,
 		FileCount: len(tasks),
+		ByteCount: resumeCopyTaskBytes(tasks),
 	}
 	if len(tasks) > 0 {
 		meta.EndFile = tasks[len(tasks)-1].src.Remote()
@@ -62,6 +63,32 @@ func newResumeFileTask(taskID int64, tasks []resumeCopyTask, startFrames, commit
 		startFrames:  append([]resume.ScanFrame(nil), startFrames...),
 		commitFrames: append([]resume.ScanFrame(nil), commitFrames...),
 	}
+}
+
+func resumeCopyTaskSize(task resumeCopyTask) int64 {
+	if task.src == nil {
+		return 0
+	}
+	size := task.src.Size()
+	if size < 0 {
+		return 0
+	}
+	return size
+}
+
+func resumeCopyTaskBytes(tasks []resumeCopyTask) int64 {
+	var bytes int64
+	for _, task := range tasks {
+		bytes += resumeCopyTaskSize(task)
+	}
+	return bytes
+}
+
+func resumeShouldDispatchBySize(itemCount int, byteCount int64, itemLimit int, byteLimit int64) bool {
+	if itemLimit > 0 && itemCount >= itemLimit {
+		return true
+	}
+	return byteLimit > 0 && byteCount >= byteLimit
 }
 
 func (s *syncCopyMove) resumeRun() error {
@@ -280,6 +307,7 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 	keyer := resume.NewMatchKeyer(s.ctx, s.fdst)
 	frames := s.resumeLegacyFileFrames(snapshot)
 	windowSize := s.resumeFileWindowSize()
+	fileMaxBytes := s.resumeFileTaskMaxBytes()
 	checkpointInterval := s.resumeSuccessCheckpointInterval()
 	frontierTaskID := s.resumeFileFrontierTaskID(snapshot)
 	var nextTaskID int64
@@ -289,6 +317,7 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 		nextTaskID = 1
 	}
 	var batch []resumeCopyTask
+	var batchBytes int64
 	var batchOpenedAt time.Time
 	var batchStartFrames []resume.ScanFrame
 	var batchCommitFrames []resume.ScanFrame
@@ -339,6 +368,7 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 		}(task)
 		nextTaskID++
 		batch = nil
+		batchBytes = 0
 		batchOpenedAt = time.Time{}
 		batchStartFrames = nil
 		batchCommitFrames = nil
@@ -459,7 +489,9 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 				batchCommitFrames = append([]resume.ScanFrame(nil), frames...)
 				batchCommitFrames[len(batchCommitFrames)-1].LastDoneEntryKey = cursorKey
 				batch = append(batch, task)
-				if len(batch) >= resumeCopyCommitBatchSize || (!batchOpenedAt.IsZero() && time.Since(batchOpenedAt) >= resumeCopyCommitBatchInterval) {
+				batchBytes += resumeCopyTaskSize(task)
+				if resumeShouldDispatchBySize(len(batch), batchBytes, resumeCopyCommitBatchSize, fileMaxBytes) ||
+					(!batchOpenedAt.IsZero() && time.Since(batchOpenedAt) >= resumeCopyCommitBatchInterval) {
 					if err := dispatchBatchAndThrottle(); err != nil {
 						return err
 					}
@@ -521,6 +553,7 @@ func (s *syncCopyMove) runResumeObjectScan(store *resume.Store, snapshot *resume
 	frontierSegmentID := state.Window.CommitFrontierSegmentID
 	windowSize := s.resumeObjectWindowSize()
 	segmentSize := s.resumeObjectSegmentSize()
+	segmentMaxBytes := s.resumeObjectSegmentMaxBytes()
 	checkpointInterval := s.resumeSuccessCheckpointInterval()
 	dstListings := make(map[string]map[string]fs.DirEntry)
 	resultsCh := make(chan resumeObjectSegmentResult, windowSize)
@@ -701,9 +734,11 @@ func (s *syncCopyMove) runResumeObjectScan(store *resume.Store, snapshot *resume
 				current.tasks = append(current.tasks, task)
 				current.meta.EndKey = sourceKey
 				current.meta.ObjectCount = len(current.tasks)
+				current.meta.ByteCount += resumeCopyTaskSize(task)
 				lastScannedKey = sourceKey
 				frame.LastDoneEntryKey = cursorKey
-				if len(current.tasks) >= segmentSize || (!segmentOpenedAt.IsZero() && checkpointInterval > 0 && time.Since(segmentOpenedAt) >= checkpointInterval) {
+				if resumeShouldDispatchBySize(len(current.tasks), current.meta.ByteCount, segmentSize, segmentMaxBytes) ||
+					(!segmentOpenedAt.IsZero() && checkpointInterval > 0 && time.Since(segmentOpenedAt) >= checkpointInterval) {
 					if err := dispatchSegment(); err != nil {
 						return err
 					}
@@ -1330,6 +1365,20 @@ func (s *syncCopyMove) resumeObjectSegmentSize() int {
 		return s.ci.ResumeObjectSegmentSize
 	}
 	return 1000
+}
+
+func (s *syncCopyMove) resumeObjectSegmentMaxBytes() int64 {
+	if s.ci.ResumeObjectSegmentMaxBytes > 0 {
+		return int64(s.ci.ResumeObjectSegmentMaxBytes)
+	}
+	return 0
+}
+
+func (s *syncCopyMove) resumeFileTaskMaxBytes() int64 {
+	if s.ci.ResumeFileTaskMaxBytes > 0 {
+		return int64(s.ci.ResumeFileTaskMaxBytes)
+	}
+	return 0
 }
 
 func (s *syncCopyMove) resumeSuccessCheckpointInterval() time.Duration {
