@@ -114,15 +114,19 @@ const (
 // FileFrame stores one lightweight directory traversal frame for the planned
 // file/NAS frontier pipeline.
 type FileFrame struct {
-	Dir         string `json:"dir"`
-	LastEntry   string `json:"last_entry,omitempty"`
-	AlreadyInto bool   `json:"already_into,omitempty"`
+	Dir               string `json:"dir"`
+	DstDir            string `json:"dst_dir,omitempty"`
+	LastEntry         string `json:"last_entry,omitempty"`
+	ContinuationToken string `json:"continuation_token,omitempty"`
+	PageIndex         int    `json:"page_index,omitempty"`
+	AlreadyInto       bool   `json:"already_into,omitempty"`
 }
 
 // FileTreeScanState stores the lightweight file scan cursor for the planned
 // file/NAS frontier pipeline.
 type FileTreeScanState struct {
-	Frames []FileFrame `json:"frames,omitempty"`
+	Frames []FileFrame     `json:"frames,omitempty"`
+	Window FileWindowState `json:"window,omitempty"`
 }
 
 // FileTask describes one batched file task for the planned file/NAS frontier

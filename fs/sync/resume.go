@@ -29,6 +29,41 @@ type resumeObjectSegmentResult struct {
 	firstFailure   error
 }
 
+type resumeFileTask struct {
+	meta         resume.FileTask
+	tasks        []resumeCopyTask
+	startFrames  []resume.ScanFrame
+	commitFrames []resume.ScanFrame
+}
+
+type resumeFileTaskResult struct {
+	task           resume.FileTask
+	startFrames    []resume.ScanFrame
+	commitFrames   []resume.ScanFrame
+	successCommits []resume.SuccessCommit
+	failureCommits []resume.FailureCommit
+	firstFailure   error
+}
+
+func newResumeFileTask(taskID int64, tasks []resumeCopyTask, startFrames, commitFrames []resume.ScanFrame) resumeFileTask {
+	meta := resume.FileTask{
+		TaskID:    taskID,
+		FileCount: len(tasks),
+	}
+	if len(tasks) > 0 {
+		meta.EndFile = tasks[len(tasks)-1].src.Remote()
+	}
+	if len(startFrames) > 0 {
+		meta.StartFrameSnapshot = resumeFileFramesStatic(startFrames)
+	}
+	return resumeFileTask{
+		meta:         meta,
+		tasks:        tasks,
+		startFrames:  append([]resume.ScanFrame(nil), startFrames...),
+		commitFrames: append([]resume.ScanFrame(nil), commitFrames...),
+	}
+}
+
 func (s *syncCopyMove) resumeRun() error {
 	if err := s.resumeValidate(); err != nil {
 		return err
@@ -238,11 +273,29 @@ func (s *syncCopyMove) runResumeSourceScan(store *resume.Store, snapshot *resume
 	if s.resumeUseObjectMode() {
 		return s.runResumeObjectScan(store, snapshot)
 	}
+	return s.runResumeFileScan(store, snapshot, skipDoneLookup)
+}
 
+func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.Snapshot, skipDoneLookup bool) error {
 	keyer := resume.NewMatchKeyer(s.ctx, s.fdst)
-	frames := snapshot.Scan.Frames
+	frames := s.resumeLegacyFileFrames(snapshot)
+	windowSize := s.resumeFileWindowSize()
+	frontierTaskID := s.resumeFileFrontierTaskID(snapshot)
+	var nextTaskID int64
+	if frontierTaskID > 0 {
+		nextTaskID = frontierTaskID + 1
+	} else {
+		nextTaskID = 1
+	}
 	var batch []resumeCopyTask
 	var batchOpenedAt time.Time
+	var batchStartFrames []resume.ScanFrame
+	var batchCommitFrames []resume.ScanFrame
+	var inflight []resume.FileTask
+	inflightCount := 0
+	resultsCh := make(chan resumeFileTaskResult, windowSize)
+	pending := make(map[int64]resumeFileTaskResult)
+	frontierBlocked := false
 	type dstDirListing struct {
 		byKey map[string]fs.DirEntry
 	}
@@ -250,7 +303,54 @@ func (s *syncCopyMove) runResumeSourceScan(store *resume.Store, snapshot *resume
 	if len(frames) == 0 {
 		frames = []resume.ScanFrame{{Dir: s.dir, DstDir: s.dir}}
 	}
+
+	persistFileScan := func(complete bool) error {
+		snapshot.Scan = s.resumeFileScanState(snapshot, frames, frontierTaskID, inflight, complete)
+		return store.SaveScan(snapshot.Scan)
+	}
+
+	dispatchTask := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		task := newResumeFileTask(nextTaskID, batch, batchStartFrames, batchCommitFrames)
+		task.meta.Status = resume.FileTaskRunning
+		inflight = append(inflight, task.meta)
+		inflightCount++
+		if err := persistFileScan(false); err != nil {
+			return err
+		}
+		go func(fileTask resumeFileTask) {
+			resultsCh <- s.runResumeFileTask(fileTask)
+		}(task)
+		nextTaskID++
+		batch = nil
+		batchOpenedAt = time.Time{}
+		batchStartFrames = nil
+		batchCommitFrames = nil
+		return nil
+	}
+
+	waitForOne := func() error {
+		result := <-resultsCh
+		inflightCount--
+		pending[result.task.TaskID] = result
+		nextFrontierTaskID, remainingInflight, blocked, err := s.commitResumeReadyFileTasks(store, snapshot, frontierTaskID, pending, inflight)
+		if err != nil {
+			return err
+		}
+		frontierTaskID = nextFrontierTaskID
+		inflight = remainingInflight
+		if blocked {
+			frontierBlocked = true
+		}
+		return nil
+	}
+
 	for len(frames) > 0 {
+		if frontierBlocked {
+			break
+		}
 		frame := &frames[len(frames)-1]
 		srcPage, err := resume.ListDirPage(s.ctx, s.fsrc, frame.Dir, false, keyer.SrcKey, frame.ContinuationToken)
 		if err != nil {
@@ -271,7 +371,6 @@ func (s *syncCopyMove) runResumeSourceScan(store *resume.Store, snapshot *resume
 			}
 			if errors.Is(err, fs.ErrorDirNotFound) {
 				dstEntries = nil
-				err = nil
 			}
 			dstListing = dstDirListing{
 				byKey: resume.DirByKey(dstEntries, keyer.DstKey),
@@ -287,22 +386,23 @@ func (s *syncCopyMove) runResumeSourceScan(store *resume.Store, snapshot *resume
 			}
 			switch x := srcEntry.(type) {
 			case fs.Directory:
-				if err = s.flushResumeCopyBatch(store, snapshot, batch); err != nil {
+				if err = dispatchTask(); err != nil {
 					return err
 				}
-				batch = nil
-				batchOpenedAt = time.Time{}
+				for inflightCount >= windowSize && !frontierBlocked {
+					if err = waitForOne(); err != nil {
+						return err
+					}
+				}
 				nextDstDir, dirErr := s.handleResumeDirectory(x, dstListing.byKey[matchKey])
 				if dirErr != nil {
 					return dirErr
 				}
 				frame.LastDoneEntryKey = cursorKey
 				frames = append(frames, resume.ScanFrame{Dir: x.Remote(), DstDir: nextDstDir})
-				scan := s.resumeCopyScanState(frames, false, snapshot.Totals.PendingFailedCount)
-				if err = store.SaveScan(scan); err != nil {
+				if err = persistFileScan(false); err != nil {
 					return err
 				}
-				snapshot.Scan = scan
 				descended = true
 			case fs.Object:
 				task, alreadyDone, fileErr := s.prepareResumeCopyTask(store, x, dstListing.byKey[matchKey], cursorKey, append([]resume.ScanFrame(nil), frames...), skipDoneLookup)
@@ -315,49 +415,71 @@ func (s *syncCopyMove) runResumeSourceScan(store *resume.Store, snapshot *resume
 				}
 				if len(batch) == 0 {
 					batchOpenedAt = time.Now()
+					batchStartFrames = append([]resume.ScanFrame(nil), frames...)
+					batchCommitFrames = append([]resume.ScanFrame(nil), frames...)
+					batchCommitFrames[len(batchCommitFrames)-1].LastDoneEntryKey = cursorKey
+				} else if len(batchCommitFrames) > 0 {
+					batchCommitFrames[len(batchCommitFrames)-1].LastDoneEntryKey = cursorKey
 				}
 				batch = append(batch, task)
 				if len(batch) >= resumeCopyCommitBatchSize || (!batchOpenedAt.IsZero() && time.Since(batchOpenedAt) >= resumeCopyCommitBatchInterval) {
-					if err = s.flushResumeCopyBatch(store, snapshot, batch); err != nil {
+					if err = dispatchTask(); err != nil {
 						return err
 					}
-					batch = nil
-					batchOpenedAt = time.Time{}
+					for inflightCount >= windowSize && !frontierBlocked {
+						if err = waitForOne(); err != nil {
+							return err
+						}
+					}
 				}
 			default:
 				return fmt.Errorf("unsupported source entry %T", srcEntry)
 			}
-			if descended {
+			if descended || frontierBlocked {
 				break
 			}
 		}
 		if descended {
 			continue
 		}
-		if err = s.flushResumeCopyBatch(store, snapshot, batch); err != nil {
+		if err = dispatchTask(); err != nil {
 			return err
 		}
-		batch = nil
-		batchOpenedAt = time.Time{}
+		for inflightCount >= windowSize && !frontierBlocked {
+			if err = waitForOne(); err != nil {
+				return err
+			}
+		}
 		if srcPage.NextContinuationToken != "" {
 			frame.ContinuationToken = srcPage.NextContinuationToken
 			frame.PageIndex = pageIndex + 1
-			scan := s.resumeCopyScanState(frames, false, snapshot.Totals.PendingFailedCount)
-			if err = store.SaveScan(scan); err != nil {
+			if err = persistFileScan(false); err != nil {
 				return err
 			}
-			snapshot.Scan = scan
 			continue
 		}
 		delete(dstListings, listingKey)
 		frames = frames[:len(frames)-1]
-		scan := s.resumeCopyScanState(frames, len(frames) == 0, snapshot.Totals.PendingFailedCount)
-		if err = store.SaveScan(scan); err != nil {
+		if err = persistFileScan(len(frames) == 0 && inflightCount == 0 && len(batch) == 0); err != nil {
 			return err
 		}
-		snapshot.Scan = scan
 	}
-	snapshot.Scan = s.resumeCopyScanState(nil, true, snapshot.Totals.PendingFailedCount)
+
+	if !frontierBlocked {
+		if err := dispatchTask(); err != nil {
+			return err
+		}
+	}
+	for inflightCount > 0 {
+		if err := waitForOne(); err != nil {
+			return err
+		}
+		if frontierBlocked {
+			break
+		}
+	}
+
+	snapshot.Scan = s.resumeFileScanState(snapshot, frames, frontierTaskID, inflight, !frontierBlocked && len(frames) == 0 && inflightCount == 0 && len(batch) == 0)
 	return store.SaveScan(snapshot.Scan)
 }
 
@@ -703,6 +825,142 @@ func (s *syncCopyMove) runResumeObjectSegment(segment resumeObjectSegment) resum
 	return result
 }
 
+func (s *syncCopyMove) runResumeFileTask(task resumeFileTask) resumeFileTaskResult {
+	results := make([]resumeCopyResult, len(task.tasks))
+	g := new(errgroup.Group)
+	g.SetLimit(s.ci.Transfers)
+	for i := range task.tasks {
+		i := i
+		g.Go(func() error {
+			done, failed, err := s.copyResumeObject(task.tasks[i].src, task.tasks[i].dst, task.tasks[i].workKey, false)
+			results[i] = resumeCopyResult{
+				task:   task.tasks[i],
+				done:   done,
+				failed: failed,
+				err:    err,
+			}
+			return nil
+		})
+	}
+	_ = g.Wait()
+
+	result := resumeFileTaskResult{
+		task:         task.meta,
+		startFrames:  append([]resume.ScanFrame(nil), task.startFrames...),
+		commitFrames: append([]resume.ScanFrame(nil), task.commitFrames...),
+	}
+	for _, item := range results {
+		scan := s.resumeCopyScanState(item.task.scanFrames, false, 0)
+		if item.err != nil {
+			result.task.Status = resume.FileTaskFailed
+			if result.firstFailure == nil {
+				result.firstFailure = item.err
+			}
+			result.failureCommits = append(result.failureCommits, resume.FailureCommit{
+				Failed:       item.failed,
+				Scan:         scan,
+				Event:        resumeFailureEvent(item.failed.Name, item.failed.Size, item.failed.Checked, item.failed.What, item.failed.LastError),
+				HistoryLimit: s.ci.ResumeHistoryLimit,
+			})
+			continue
+		}
+		historyEvent := resume.HistoryEvent{}
+		if item.done.Bytes > 0 || item.done.Checks > 0 {
+			historyEvent = resumeSuccessEvent(item.done)
+		}
+		result.successCommits = append(result.successCommits, resume.SuccessCommit{
+			Done:         item.done,
+			Scan:         scan,
+			Event:        historyEvent,
+			HistoryLimit: s.ci.ResumeHistoryLimit,
+		})
+	}
+	if result.task.Status == "" {
+		result.task.Status = resume.FileTaskDone
+	}
+	return result
+}
+
+func (s *syncCopyMove) commitResumeReadyFileTasks(store *resume.Store, snapshot *resume.Snapshot, frontierTaskID int64, pending map[int64]resumeFileTaskResult, inflight []resume.FileTask) (nextFrontierTaskID int64, remainingInflight []resume.FileTask, blocked bool, err error) {
+	nextFrontierTaskID = frontierTaskID
+	remainingInflight = append([]resume.FileTask(nil), inflight...)
+	ready := resumeFileFrontierReady(frontierTaskID, pending)
+	if len(ready) == 0 {
+		return nextFrontierTaskID, remainingInflight, false, nil
+	}
+	popInflight := func(taskID int64) {
+		next := remainingInflight[:0]
+		for _, task := range remainingInflight {
+			if task.TaskID != taskID {
+				next = append(next, task)
+			}
+		}
+		remainingInflight = next
+	}
+
+	for _, result := range ready {
+		if result.task.Status == resume.FileTaskFailed {
+			if result.firstFailure != nil {
+				s.processError(result.firstFailure)
+			}
+			for _, commit := range result.failureCommits {
+				commit.Scan = s.resumeFileScanState(snapshot, result.startFrames, nextFrontierTaskID, remainingInflight, false)
+				newSnapshot, commitErr := store.CommitFailure(commit)
+				if commitErr != nil {
+					return nextFrontierTaskID, remainingInflight, true, commitErr
+				}
+				if syncErr := s.syncResumeScanLimit(store, &newSnapshot); syncErr != nil {
+					return nextFrontierTaskID, remainingInflight, true, syncErr
+				}
+				*snapshot = newSnapshot
+				s.processError(errors.New(commit.Failed.LastError))
+				if limitErr := s.stopForErrorLimit(snapshot); limitErr != nil {
+					return nextFrontierTaskID, remainingInflight, true, limitErr
+				}
+			}
+			delete(pending, result.task.TaskID)
+			popInflight(result.task.TaskID)
+			blocked = true
+			snapshot.Scan = s.resumeFileScanState(snapshot, result.startFrames, nextFrontierTaskID, remainingInflight, false)
+			if saveErr := store.SaveScan(snapshot.Scan); saveErr != nil {
+				return nextFrontierTaskID, remainingInflight, true, saveErr
+			}
+			if result.firstFailure != nil {
+				return nextFrontierTaskID, remainingInflight, true, result.firstFailure
+			}
+			if len(result.failureCommits) > 0 {
+				return nextFrontierTaskID, remainingInflight, true, errors.New(result.failureCommits[0].Failed.LastError)
+			}
+			return nextFrontierTaskID, remainingInflight, true, nil
+		}
+		if len(result.successCommits) > 0 {
+			successScan := s.resumeFileScanState(snapshot, result.commitFrames, nextFrontierTaskID, remainingInflight, false)
+			commits := make([]resume.SuccessCommit, 0, len(result.successCommits))
+			for _, commit := range result.successCommits {
+				commit.Scan = successScan
+				commits = append(commits, commit)
+			}
+			newSnapshot, commitErr := store.CommitSuccessBatch(resume.SuccessBatchCommit{Commits: commits})
+			if commitErr != nil {
+				return nextFrontierTaskID, remainingInflight, false, commitErr
+			}
+			if syncErr := s.syncResumeScanLimit(store, &newSnapshot); syncErr != nil {
+				return nextFrontierTaskID, remainingInflight, false, syncErr
+			}
+			*snapshot = newSnapshot
+		}
+		nextFrontierTaskID = result.task.TaskID
+		delete(pending, result.task.TaskID)
+		popInflight(result.task.TaskID)
+	}
+
+	snapshot.Scan = s.resumeFileScanState(snapshot, s.resumeLegacyFileFrames(snapshot), nextFrontierTaskID, remainingInflight, false)
+	if err := store.SaveScan(snapshot.Scan); err != nil {
+		return nextFrontierTaskID, remainingInflight, false, err
+	}
+	return nextFrontierTaskID, remainingInflight, false, nil
+}
+
 func (s *syncCopyMove) flushResumeCopyBatch(store *resume.Store, snapshot *resume.Snapshot, batch []resumeCopyTask) error {
 	if len(batch) == 0 {
 		return nil
@@ -1024,6 +1282,81 @@ func (s *syncCopyMove) resumeObjectState(snapshot *resume.Snapshot) *resume.Obje
 	}
 }
 
+func (s *syncCopyMove) resumeFileWindowSize() int {
+	if s.ci.ResumeFileWindowSize > 0 {
+		return s.ci.ResumeFileWindowSize
+	}
+	return 3
+}
+
+func (s *syncCopyMove) resumeFileFrontierTaskID(snapshot *resume.Snapshot) int64 {
+	if snapshot.Scan.FileTree != nil && snapshot.Scan.FileTree.Window.CommitFrontierTaskID > 0 {
+		return snapshot.Scan.FileTree.Window.CommitFrontierTaskID
+	}
+	return 0
+}
+
+func (s *syncCopyMove) resumeFileFrames(frames []resume.ScanFrame) []resume.FileFrame {
+	return resumeFileFramesStatic(frames)
+}
+
+func (s *syncCopyMove) resumeScanFramesFromFileTree(frames []resume.FileFrame) []resume.ScanFrame {
+	out := make([]resume.ScanFrame, 0, len(frames))
+	for _, frame := range frames {
+		out = append(out, resume.ScanFrame{
+			Dir:               frame.Dir,
+			DstDir:            frame.DstDir,
+			LastDoneEntryKey:  frame.LastEntry,
+			ContinuationToken: frame.ContinuationToken,
+			PageIndex:         frame.PageIndex,
+		})
+	}
+	return out
+}
+
+func (s *syncCopyMove) resumeLegacyFileFrames(snapshot *resume.Snapshot) []resume.ScanFrame {
+	if snapshot != nil && snapshot.Scan.FileTree != nil {
+		if earliest := s.resumeEarliestInflightFileFrames(snapshot.Scan.FileTree.Window.InflightTasks); len(earliest) > 0 {
+			return earliest
+		}
+		if len(snapshot.Scan.FileTree.Frames) > 0 {
+			return s.resumeScanFramesFromFileTree(snapshot.Scan.FileTree.Frames)
+		}
+	}
+	return append([]resume.ScanFrame(nil), snapshot.Scan.Frames...)
+}
+
+func (s *syncCopyMove) resumeEarliestInflightFileFrames(tasks []resume.FileTask) []resume.ScanFrame {
+	var earliest *resume.FileTask
+	for i := range tasks {
+		task := &tasks[i]
+		if len(task.StartFrameSnapshot) == 0 {
+			continue
+		}
+		if earliest == nil || task.TaskID < earliest.TaskID {
+			earliest = task
+		}
+	}
+	if earliest == nil {
+		return nil
+	}
+	return s.resumeScanFramesFromFileTree(earliest.StartFrameSnapshot)
+}
+
+func resumeFileFramesStatic(frames []resume.ScanFrame) []resume.FileFrame {
+	out := make([]resume.FileFrame, 0, len(frames))
+	for _, frame := range frames {
+		out = append(out, resume.FileFrame{
+			Dir:               frame.Dir,
+			DstDir:            frame.DstDir,
+			LastEntry:         frame.LastDoneEntryKey,
+			ContinuationToken: frame.ContinuationToken,
+			PageIndex:         frame.PageIndex,
+		})
+	}
+	return out
+}
+
 func (s *syncCopyMove) resumeObjectScanState(snapshot *resume.Snapshot, rootPrefix, lastCommittedKey, lastScannedKey string, frontierSegmentID int64, inflight []resume.ObjectSegment, complete bool) resume.ScanState {
 	scan := buildCopyScanState([]resume.ScanFrame{{
 		Dir:    s.dir,
@@ -1044,8 +1377,25 @@ func (s *syncCopyMove) resumeObjectScanState(snapshot *resume.Snapshot, rootPref
 	return scan
 }
 
+func (s *syncCopyMove) resumeFileScanState(snapshot *resume.Snapshot, frames []resume.ScanFrame, frontierTaskID int64, inflight []resume.FileTask, complete bool) resume.ScanState {
+	scan := buildCopyScanState(frames, s.resumeOverErrorLimit(snapshot.Totals.PendingFailedCount), complete)
+	scan.FileTree = &resume.FileTreeScanState{
+		Frames: s.resumeFileFrames(frames),
+		Window: resume.FileWindowState{
+			WindowSize:           s.resumeFileWindowSize(),
+			InflightTasks:        append([]resume.FileTask(nil), inflight...),
+			CommitFrontierTaskID: frontierTaskID,
+		},
+	}
+	return scan
+}
+
 func (s *syncCopyMove) resumeCopyScanState(frames []resume.ScanFrame, complete bool, pendingFailed int64) resume.ScanState {
-	return buildCopyScanState(frames, s.resumeOverErrorLimit(pendingFailed), complete)
+	scan := buildCopyScanState(frames, s.resumeOverErrorLimit(pendingFailed), complete)
+	scan.FileTree = &resume.FileTreeScanState{
+		Frames: s.resumeFileFrames(frames),
+	}
+	return scan
 }
 
 func (s *syncCopyMove) syncResumeScanLimit(store *resume.Store, snapshot *resume.Snapshot) error {
@@ -1067,6 +1417,21 @@ func resumeObjectFrontierReady(frontierSegmentID int64, pending map[int64]resume
 		}
 		ready = append(ready, result)
 		if result.segment.Status == resume.ObjectSegmentFailed {
+			return ready
+		}
+	}
+}
+
+func resumeFileFrontierReady(frontierTaskID int64, pending map[int64]resumeFileTaskResult) []resumeFileTaskResult {
+	ready := make([]resumeFileTaskResult, 0)
+	for {
+		taskID := frontierTaskID + int64(len(ready)) + 1
+		result, ok := pending[taskID]
+		if !ok {
+			return ready
+		}
+		ready = append(ready, result)
+		if result.task.Status == resume.FileTaskFailed {
 			return ready
 		}
 	}

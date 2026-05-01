@@ -156,6 +156,193 @@ func TestResumeObjectFrontierReadyHonorsContiguousPrefix(t *testing.T) {
 	assert.Equal(t, resume.ObjectSegmentFailed, ready[0].segment.Status)
 }
 
+func TestResumeFileFrontierReadyHonorsContiguousPrefix(t *testing.T) {
+	pending := map[int64]resumeFileTaskResult{
+		2: {task: resume.FileTask{TaskID: 2, Status: resume.FileTaskDone, EndFile: "b.txt"}},
+		3: {task: resume.FileTask{TaskID: 3, Status: resume.FileTaskDone, EndFile: "c.txt"}},
+	}
+	assert.Empty(t, resumeFileFrontierReady(0, pending))
+
+	pending[1] = resumeFileTaskResult{task: resume.FileTask{TaskID: 1, Status: resume.FileTaskDone, EndFile: "a.txt"}}
+	ready := resumeFileFrontierReady(0, pending)
+	require.Len(t, ready, 3)
+	assert.Equal(t, int64(1), ready[0].task.TaskID)
+	assert.Equal(t, int64(3), ready[2].task.TaskID)
+
+	pending[4] = resumeFileTaskResult{task: resume.FileTask{TaskID: 4, Status: resume.FileTaskFailed, EndFile: "d.txt"}}
+	ready = resumeFileFrontierReady(3, pending)
+	require.Len(t, ready, 1)
+	assert.Equal(t, resume.FileTaskFailed, ready[0].task.Status)
+}
+
+func TestNewResumeFileTaskCapturesTaskMetadata(t *testing.T) {
+	ctx := newCopyResumeTestContext(t, "copy-resume-file-task-meta", 1)
+	srcDir := t.TempDir()
+	writeCopyResumeFile(t, srcDir, "a/one.txt", "1")
+	writeCopyResumeFile(t, srcDir, "a/two.txt", "22")
+	fsrc := newCopyResumeLocalFs(t, ctx, srcDir)
+	one, err := fsrc.NewObject(ctx, "a/one.txt")
+	require.NoError(t, err)
+	two, err := fsrc.NewObject(ctx, "a/two.txt")
+	require.NoError(t, err)
+
+	frames := []resume.ScanFrame{
+		{Dir: "", DstDir: "", LastDoneEntryKey: "0:1", ContinuationToken: "tok", PageIndex: 2},
+		{Dir: "a", DstDir: "a", LastDoneEntryKey: "0:3", PageIndex: 0},
+	}
+	startFrames := []resume.ScanFrame{
+		{Dir: "", DstDir: "", LastDoneEntryKey: "0:0"},
+		{Dir: "a", DstDir: "a"},
+	}
+	tasks := []resumeCopyTask{
+		{src: one},
+		{src: two},
+	}
+
+	task := newResumeFileTask(7, tasks, startFrames, frames)
+	assert.Equal(t, int64(7), task.meta.TaskID)
+	assert.Equal(t, 2, task.meta.FileCount)
+	assert.Equal(t, "a/two.txt", task.meta.EndFile)
+	require.Len(t, task.meta.StartFrameSnapshot, 2)
+	assert.Equal(t, "", task.meta.StartFrameSnapshot[0].Dir)
+	assert.Equal(t, "0:0", task.meta.StartFrameSnapshot[0].LastEntry)
+	assert.Equal(t, "", task.meta.StartFrameSnapshot[0].ContinuationToken)
+	assert.Equal(t, "", task.meta.StartFrameSnapshot[1].LastEntry)
+	assert.Equal(t, frames, task.commitFrames)
+}
+
+func TestCommitResumeReadyFileTasksAdvancesContiguousFrontier(t *testing.T) {
+	ctx := newCopyResumeTestContext(t, "copy-resume-file-frontier-commit", 1)
+	meta := resume.Meta{
+		FormatVersion: resume.FormatVersion,
+		JobID:         fs.GetConfig(ctx).ResumeID,
+		Op:            "copy",
+		SrcConfig:     "src",
+		DstConfig:     "dst",
+	}
+	initialScan := resume.ScanState{
+		Phase:  resume.PhaseCopySource,
+		Target: "src",
+		Frames: []resume.ScanFrame{{Dir: "", DstDir: ""}},
+	}
+	store, err := resume.Open(ctx, meta.JobID)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, store.Close(true))
+	}()
+	snapshot, _, err := store.LoadOrInit(meta, initialScan)
+	require.NoError(t, err)
+
+	s := &syncCopyMove{ctx: ctx, ci: fs.GetConfig(ctx)}
+	inflight := []resume.FileTask{
+		{TaskID: 1}, {TaskID: 2}, {TaskID: 4},
+	}
+	pending := map[int64]resumeFileTaskResult{
+		1: {
+			task:         resume.FileTask{TaskID: 1, Status: resume.FileTaskDone, EndFile: "a.txt"},
+			commitFrames: []resume.ScanFrame{{Dir: "", DstDir: "", LastDoneEntryKey: "0:1"}},
+			successCommits: []resume.SuccessCommit{{
+				Done:         resume.DoneRecord{WorkKey: "wk1", Name: "a.txt", Files: 1, Objects: 1, Bytes: 10},
+				HistoryLimit: s.ci.ResumeHistoryLimit,
+			}},
+		},
+		2: {
+			task:         resume.FileTask{TaskID: 2, Status: resume.FileTaskDone, EndFile: "b.txt"},
+			commitFrames: []resume.ScanFrame{{Dir: "", DstDir: "", LastDoneEntryKey: "0:2"}},
+			successCommits: []resume.SuccessCommit{{
+				Done:         resume.DoneRecord{WorkKey: "wk2", Name: "b.txt", Files: 1, Objects: 1, Bytes: 20},
+				HistoryLimit: s.ci.ResumeHistoryLimit,
+			}},
+		},
+		4: {
+			task:         resume.FileTask{TaskID: 4, Status: resume.FileTaskDone, EndFile: "d.txt"},
+			commitFrames: []resume.ScanFrame{{Dir: "", DstDir: "", LastDoneEntryKey: "0:4"}},
+			successCommits: []resume.SuccessCommit{{
+				Done:         resume.DoneRecord{WorkKey: "wk4", Name: "d.txt", Files: 1, Objects: 1, Bytes: 40},
+				HistoryLimit: s.ci.ResumeHistoryLimit,
+			}},
+		},
+	}
+
+	nextFrontier, remaining, blocked, err := s.commitResumeReadyFileTasks(store, &snapshot, 0, pending, inflight)
+	require.NoError(t, err)
+	assert.False(t, blocked)
+	assert.Equal(t, int64(2), nextFrontier)
+	require.Len(t, remaining, 1)
+	assert.Equal(t, int64(4), remaining[0].TaskID)
+	assert.Equal(t, int64(2), snapshot.Totals.Files)
+	assert.Equal(t, int64(30), snapshot.Totals.Bytes)
+	require.NotNil(t, snapshot.Scan.FileTree)
+	assert.Equal(t, int64(2), snapshot.Scan.FileTree.Window.CommitFrontierTaskID)
+	require.Len(t, snapshot.Scan.FileTree.Window.InflightTasks, 1)
+	assert.Equal(t, int64(4), snapshot.Scan.FileTree.Window.InflightTasks[0].TaskID)
+}
+
+func TestCommitResumeReadyFileTasksStopsAtFailure(t *testing.T) {
+	ctx := newCopyResumeTestContext(t, "copy-resume-file-frontier-failure", 1)
+	meta := resume.Meta{
+		FormatVersion: resume.FormatVersion,
+		JobID:         fs.GetConfig(ctx).ResumeID,
+		Op:            "copy",
+		SrcConfig:     "src",
+		DstConfig:     "dst",
+	}
+	initialScan := resume.ScanState{
+		Phase:  resume.PhaseCopySource,
+		Target: "src",
+		Frames: []resume.ScanFrame{{Dir: "", DstDir: ""}},
+	}
+	store, err := resume.Open(ctx, meta.JobID)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, store.Close(true))
+	}()
+	snapshot, _, err := store.LoadOrInit(meta, initialScan)
+	require.NoError(t, err)
+
+	s := &syncCopyMove{ctx: ctx, ci: fs.GetConfig(ctx)}
+	inflight := []resume.FileTask{{TaskID: 1}, {TaskID: 2}}
+	pending := map[int64]resumeFileTaskResult{
+		1: {
+			task:         resume.FileTask{TaskID: 1, Status: resume.FileTaskDone, EndFile: "a.txt"},
+			commitFrames: []resume.ScanFrame{{Dir: "", DstDir: "", LastDoneEntryKey: "0:1"}},
+			successCommits: []resume.SuccessCommit{{
+				Done:         resume.DoneRecord{WorkKey: "wk1", Name: "a.txt", Files: 1, Objects: 1, Bytes: 10},
+				HistoryLimit: s.ci.ResumeHistoryLimit,
+			}},
+		},
+		2: {
+			task:        resume.FileTask{TaskID: 2, Status: resume.FileTaskFailed, EndFile: "b.txt"},
+			startFrames: []resume.ScanFrame{{Dir: "", DstDir: "", LastDoneEntryKey: "0:1"}},
+			commitFrames: []resume.ScanFrame{{Dir: "", DstDir: "", LastDoneEntryKey: "0:2"}},
+			successCommits: []resume.SuccessCommit{{
+				Done:         resume.DoneRecord{WorkKey: "wk2-ok", Name: "b-ok.txt", Files: 1, Objects: 1, Bytes: 11},
+				HistoryLimit: s.ci.ResumeHistoryLimit,
+			}},
+			failureCommits: []resume.FailureCommit{{
+				Failed:       resume.FailedRecord{WorkKey: "wk2", SrcRemote: "b.txt", Name: "b.txt", LastError: "boom", What: "transferring"},
+				HistoryLimit: s.ci.ResumeHistoryLimit,
+			}},
+		},
+	}
+
+	nextFrontier, remaining, blocked, err := s.commitResumeReadyFileTasks(store, &snapshot, 0, pending, inflight)
+	require.ErrorContains(t, err, "boom")
+	assert.True(t, blocked)
+	assert.Equal(t, int64(1), nextFrontier)
+	assert.Empty(t, remaining)
+	assert.Equal(t, int64(1), snapshot.Totals.Files)
+	assert.Equal(t, int64(1), snapshot.Totals.PendingFailedCount)
+	require.NotNil(t, snapshot.Scan.FileTree)
+	assert.Equal(t, int64(1), snapshot.Scan.FileTree.Window.CommitFrontierTaskID)
+	require.Len(t, snapshot.Scan.FileTree.Frames, 1)
+	assert.Equal(t, "0:1", snapshot.Scan.FileTree.Frames[0].LastEntry)
+	failed, err := store.ListFailed()
+	require.NoError(t, err)
+	require.Len(t, failed, 1)
+	assert.Equal(t, "b.txt", failed[0].SrcRemote)
+}
+
 func TestCopyDirResumeRestoresDeepDirectoryStack(t *testing.T) {
 	ctx := newCopyResumeTestContext(t, "copy-resume-deep-stack", 1)
 	srcDir := t.TempDir()
@@ -241,6 +428,106 @@ func TestCopyDirResumeRestoresAfterFinishedChildBeforeParentPop(t *testing.T) {
 	assert.Equal(t, "after", readCopyResumeFile(t, dstDir, "a-parent/z-after.txt"))
 	assert.Equal(t, "root", readCopyResumeFile(t, dstDir, "z-root.txt"))
 	assert.Equal(t, int64(3), accounting.GlobalStats().GetTransfers())
+}
+
+func TestCopyDirResumeRestoresFromFileTreeFrames(t *testing.T) {
+	ctx := newCopyResumeTestContext(t, "copy-resume-file-tree-frames", 1)
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	writeCopyResumeFile(t, srcDir, "a-parent/a-child/a-done.txt", "done")
+	writeCopyResumeFile(t, srcDir, "a-parent/a-child/z-pending.txt", "pending")
+	writeCopyResumeFile(t, srcDir, "a-parent/z-after.txt", "after")
+	writeCopyResumeFile(t, srcDir, "z-root.txt", "root")
+	writeCopyResumeFile(t, dstDir, "a-parent/a-child/a-done.txt", "done")
+
+	fsrc := newCopyResumeLocalFs(t, ctx, srcDir)
+	fdst := newCopyResumeLocalFs(t, ctx, dstDir)
+	seedCopyResumeDone(t, ctx, fsrc, fdst, "a-parent/a-child/a-done.txt")
+
+	meta := copyResumeMeta(ctx, fsrc, fdst, false)
+	legacyFrames := []resume.ScanFrame{
+		copyResumeFrame(t, ctx, fsrc, fdst, "", "", "a-parent"),
+		copyResumeFrame(t, ctx, fsrc, fdst, "a-parent", "a-parent", "a-parent/a-child"),
+		copyResumeFrame(t, ctx, fsrc, fdst, "a-parent/a-child", "a-parent/a-child", "a-parent/a-child/a-done.txt"),
+	}
+	fileTreeFrames := make([]resume.FileFrame, 0, len(legacyFrames))
+	for _, frame := range legacyFrames {
+		fileTreeFrames = append(fileTreeFrames, resume.FileFrame{
+			Dir:               frame.Dir,
+			DstDir:            frame.DstDir,
+			LastEntry:         frame.LastDoneEntryKey,
+			ContinuationToken: frame.ContinuationToken,
+			PageIndex:         frame.PageIndex,
+		})
+	}
+	seedCopyResumeSnapshot(t, ctx, meta, resume.ScanState{
+		Phase:    resume.PhaseCopySource,
+		Target:   "src",
+		FileTree: &resume.FileTreeScanState{Frames: fileTreeFrames},
+	})
+
+	accounting.GlobalStats().ResetCounters()
+	defer accounting.GlobalStats().ResetCounters()
+
+	err := CopyDir(ctx, fdst, fsrc, false)
+	require.NoError(t, err)
+	assert.Equal(t, "done", readCopyResumeFile(t, dstDir, "a-parent/a-child/a-done.txt"))
+	assert.Equal(t, "pending", readCopyResumeFile(t, dstDir, "a-parent/a-child/z-pending.txt"))
+	assert.Equal(t, "after", readCopyResumeFile(t, dstDir, "a-parent/z-after.txt"))
+	assert.Equal(t, "root", readCopyResumeFile(t, dstDir, "z-root.txt"))
+	assert.Equal(t, int64(4), accounting.GlobalStats().GetTransfers())
+}
+
+func TestResumeLegacyFileFramesPrefersEarliestInflightTask(t *testing.T) {
+	ctx := newCopyResumeTestContext(t, "copy-resume-file-tree-inflight", 1)
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	writeCopyResumeFile(t, srcDir, "a.txt", "a")
+	writeCopyResumeFile(t, srcDir, "b.txt", "b")
+
+	fsrc := newCopyResumeLocalFs(t, ctx, srcDir)
+	fdst := newCopyResumeLocalFs(t, ctx, dstDir)
+
+	s := &syncCopyMove{
+		ctx:  ctx,
+		fsrc: fsrc,
+		fdst: fdst,
+	}
+	snapshot := &resume.Snapshot{
+		Scan: resume.ScanState{
+			FileTree: &resume.FileTreeScanState{
+				Frames: []resume.FileFrame{{
+					Dir:       "",
+					DstDir:    "",
+					LastEntry: resume.CursorKey(0, 1),
+				}},
+				Window: resume.FileWindowState{
+					InflightTasks: []resume.FileTask{
+						{
+							TaskID: 2,
+							StartFrameSnapshot: []resume.FileFrame{{
+								Dir:       "",
+								DstDir:    "",
+								LastEntry: resume.CursorKey(0, 1),
+							}},
+						},
+						{
+							TaskID: 1,
+							StartFrameSnapshot: []resume.FileFrame{{
+								Dir:       "",
+								DstDir:    "",
+								LastEntry: resume.CursorKey(0, 0),
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	frames := s.resumeLegacyFileFrames(snapshot)
+	require.Len(t, frames, 1)
+	assert.Equal(t, resume.CursorKey(0, 0), frames[0].LastDoneEntryKey)
 }
 
 func TestCopyDirResumeRestoresEmptyDirectoriesAndDirModTimes(t *testing.T) {
@@ -412,8 +699,7 @@ func TestCopyDirResumeErrorLimitFail(t *testing.T) {
 	require.Len(t, failedRecords, 1)
 	assert.Equal(t, "a-fail.txt", failedRecords[0].SrcRemote)
 
-	_, statErr := os.Stat(filepath.Join(dstDir, filepath.FromSlash("sub/success.txt")))
-	assert.Error(t, statErr)
+	assert.Equal(t, "success", readCopyResumeFile(t, dstDir, "sub/success.txt"))
 	assert.False(t, hasCopyResumeDone(t, ctx, store, fsrc, "sub/success.txt"))
 }
 
@@ -451,7 +737,7 @@ func TestCopyDirResumeContinuesBelowErrorLimit(t *testing.T) {
 	assert.Equal(t, "a-fail.txt", failedRecords[0].SrcRemote)
 
 	assert.Equal(t, "success", readCopyResumeFile(t, dstDir, "sub/success.txt"))
-	assert.True(t, hasCopyResumeDone(t, ctx, store, fsrc, "sub/success.txt"))
+	assert.False(t, hasCopyResumeDone(t, ctx, store, fsrc, "sub/success.txt"))
 }
 
 func TestCopyDirResumeClearsStateAndRestoresHistoryOnSuccess(t *testing.T) {
