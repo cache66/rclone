@@ -10,9 +10,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rclone/rclone/fs/accounting"
 	"github.com/rclone/rclone/fs/fshttp"
-	"github.com/rclone/rclone/fs/resume"
 	"github.com/rclone/rclone/fs/rc"
 	"github.com/rclone/rclone/fs/rc/jobs"
+	"github.com/rclone/rclone/fs/resume"
 	libhttp "github.com/rclone/rclone/lib/http"
 )
 
@@ -35,19 +35,29 @@ func init() {
 }
 
 type resumeCollector struct {
-	saveScanTotal                  *prometheus.Desc
-	saveScanSecondsTotal           *prometheus.Desc
-	commitSuccessBatchTotal        *prometheus.Desc
-	commitSuccessBatchItemsTotal   *prometheus.Desc
-	commitSuccessBatchSecondsTotal *prometheus.Desc
-	fileFrontierCommitTotal        *prometheus.Desc
-	fileFrontierCommittedTasks     *prometheus.Desc
-	fileFrontierBlockedTotal       *prometheus.Desc
-	fileFrontierInflight           *prometheus.Desc
-	fileFrontierPending            *prometheus.Desc
-	fileScanPagesTotal             *prometheus.Desc
-	fileScanDirectoriesTotal       *prometheus.Desc
-	fileTasksCreatedTotal          *prometheus.Desc
+	saveScanTotal                   *prometheus.Desc
+	saveScanSecondsTotal            *prometheus.Desc
+	commitSuccessBatchTotal         *prometheus.Desc
+	commitSuccessBatchItemsTotal    *prometheus.Desc
+	commitSuccessBatchSecondsTotal  *prometheus.Desc
+	objectFrontierCommitTotal       *prometheus.Desc
+	objectFrontierCommittedSegments *prometheus.Desc
+	objectFrontierBlockedTotal      *prometheus.Desc
+	objectFrontierInflight          *prometheus.Desc
+	objectFrontierPending           *prometheus.Desc
+	objectSegmentsCreatedTotal      *prometheus.Desc
+	objectSegmentObjectsTotal       *prometheus.Desc
+	objectSegmentBytesTotal         *prometheus.Desc
+	fileFrontierCommitTotal         *prometheus.Desc
+	fileFrontierCommittedTasks      *prometheus.Desc
+	fileFrontierBlockedTotal        *prometheus.Desc
+	fileFrontierInflight            *prometheus.Desc
+	fileFrontierPending             *prometheus.Desc
+	fileScanPagesTotal              *prometheus.Desc
+	fileScanDirectoriesTotal        *prometheus.Desc
+	fileTasksCreatedTotal           *prometheus.Desc
+	fileTaskFilesTotal              *prometheus.Desc
+	fileTaskBytesTotal              *prometheus.Desc
 }
 
 func newResumeCollector() *resumeCollector {
@@ -62,6 +72,22 @@ func newResumeCollector() *resumeCollector {
 			"Number of completed items persisted via resume batch commits", nil, nil),
 		commitSuccessBatchSecondsTotal: prometheus.NewDesc("rclone_resume_commit_success_batch_seconds_total",
 			"Cumulative time spent in resume batch success commits", nil, nil),
+		objectFrontierCommitTotal: prometheus.NewDesc("rclone_resume_object_frontier_commit_total",
+			"Number of object frontier commit operations that advanced at least one segment", nil, nil),
+		objectFrontierCommittedSegments: prometheus.NewDesc("rclone_resume_object_frontier_committed_segments_total",
+			"Number of object resume segments committed through the frontier", nil, nil),
+		objectFrontierBlockedTotal: prometheus.NewDesc("rclone_resume_object_frontier_blocked_total",
+			"Number of times object frontier commit processing was blocked by a failed segment", nil, nil),
+		objectFrontierInflight: prometheus.NewDesc("rclone_resume_object_frontier_inflight",
+			"Current number of in-flight object resume segments tracked by the frontier", nil, nil),
+		objectFrontierPending: prometheus.NewDesc("rclone_resume_object_frontier_pending",
+			"Current number of pending completed object resume segments waiting on the frontier", nil, nil),
+		objectSegmentsCreatedTotal: prometheus.NewDesc("rclone_resume_object_segments_created_total",
+			"Number of object resume segments created", nil, nil),
+		objectSegmentObjectsTotal: prometheus.NewDesc("rclone_resume_object_segment_objects_total",
+			"Number of objects assigned to created object resume segments", nil, nil),
+		objectSegmentBytesTotal: prometheus.NewDesc("rclone_resume_object_segment_bytes_total",
+			"Number of bytes assigned to created object resume segments", nil, nil),
 		fileFrontierCommitTotal: prometheus.NewDesc("rclone_resume_file_frontier_commit_total",
 			"Number of file frontier commit operations that advanced at least one task", nil, nil),
 		fileFrontierCommittedTasks: prometheus.NewDesc("rclone_resume_file_frontier_committed_tasks_total",
@@ -78,6 +104,10 @@ func newResumeCollector() *resumeCollector {
 			"Number of file resume directory descents", nil, nil),
 		fileTasksCreatedTotal: prometheus.NewDesc("rclone_resume_file_tasks_created_total",
 			"Number of file resume tasks created", nil, nil),
+		fileTaskFilesTotal: prometheus.NewDesc("rclone_resume_file_task_files_total",
+			"Number of files assigned to created file resume tasks", nil, nil),
+		fileTaskBytesTotal: prometheus.NewDesc("rclone_resume_file_task_bytes_total",
+			"Number of bytes assigned to created file resume tasks", nil, nil),
 	}
 }
 
@@ -87,6 +117,14 @@ func (c *resumeCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.commitSuccessBatchTotal
 	ch <- c.commitSuccessBatchItemsTotal
 	ch <- c.commitSuccessBatchSecondsTotal
+	ch <- c.objectFrontierCommitTotal
+	ch <- c.objectFrontierCommittedSegments
+	ch <- c.objectFrontierBlockedTotal
+	ch <- c.objectFrontierInflight
+	ch <- c.objectFrontierPending
+	ch <- c.objectSegmentsCreatedTotal
+	ch <- c.objectSegmentObjectsTotal
+	ch <- c.objectSegmentBytesTotal
 	ch <- c.fileFrontierCommitTotal
 	ch <- c.fileFrontierCommittedTasks
 	ch <- c.fileFrontierBlockedTotal
@@ -95,6 +133,8 @@ func (c *resumeCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.fileScanPagesTotal
 	ch <- c.fileScanDirectoriesTotal
 	ch <- c.fileTasksCreatedTotal
+	ch <- c.fileTaskFilesTotal
+	ch <- c.fileTaskBytesTotal
 }
 
 func (c *resumeCollector) Collect(ch chan<- prometheus.Metric) {
@@ -104,6 +144,14 @@ func (c *resumeCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.commitSuccessBatchTotal, prometheus.CounterValue, float64(m.CommitSuccessBatchTotal))
 	ch <- prometheus.MustNewConstMetric(c.commitSuccessBatchItemsTotal, prometheus.CounterValue, float64(m.CommitSuccessBatchItemsTotal))
 	ch <- prometheus.MustNewConstMetric(c.commitSuccessBatchSecondsTotal, prometheus.CounterValue, m.CommitSuccessBatchSecondsTotal)
+	ch <- prometheus.MustNewConstMetric(c.objectFrontierCommitTotal, prometheus.CounterValue, float64(m.ObjectFrontierCommitTotal))
+	ch <- prometheus.MustNewConstMetric(c.objectFrontierCommittedSegments, prometheus.CounterValue, float64(m.ObjectFrontierCommittedSegments))
+	ch <- prometheus.MustNewConstMetric(c.objectFrontierBlockedTotal, prometheus.CounterValue, float64(m.ObjectFrontierBlockedTotal))
+	ch <- prometheus.MustNewConstMetric(c.objectFrontierInflight, prometheus.GaugeValue, float64(m.ObjectFrontierInflight))
+	ch <- prometheus.MustNewConstMetric(c.objectFrontierPending, prometheus.GaugeValue, float64(m.ObjectFrontierPending))
+	ch <- prometheus.MustNewConstMetric(c.objectSegmentsCreatedTotal, prometheus.CounterValue, float64(m.ObjectSegmentsCreatedTotal))
+	ch <- prometheus.MustNewConstMetric(c.objectSegmentObjectsTotal, prometheus.CounterValue, float64(m.ObjectSegmentObjectsTotal))
+	ch <- prometheus.MustNewConstMetric(c.objectSegmentBytesTotal, prometheus.CounterValue, float64(m.ObjectSegmentBytesTotal))
 	ch <- prometheus.MustNewConstMetric(c.fileFrontierCommitTotal, prometheus.CounterValue, float64(m.FileFrontierCommitTotal))
 	ch <- prometheus.MustNewConstMetric(c.fileFrontierCommittedTasks, prometheus.CounterValue, float64(m.FileFrontierCommittedTasks))
 	ch <- prometheus.MustNewConstMetric(c.fileFrontierBlockedTotal, prometheus.CounterValue, float64(m.FileFrontierBlockedTotal))
@@ -112,6 +160,8 @@ func (c *resumeCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.fileScanPagesTotal, prometheus.CounterValue, float64(m.FileScanPagesTotal))
 	ch <- prometheus.MustNewConstMetric(c.fileScanDirectoriesTotal, prometheus.CounterValue, float64(m.FileScanDirectoriesTotal))
 	ch <- prometheus.MustNewConstMetric(c.fileTasksCreatedTotal, prometheus.CounterValue, float64(m.FileTasksCreatedTotal))
+	ch <- prometheus.MustNewConstMetric(c.fileTaskFilesTotal, prometheus.CounterValue, float64(m.FileTaskFilesTotal))
+	ch <- prometheus.MustNewConstMetric(c.fileTaskBytesTotal, prometheus.CounterValue, float64(m.FileTaskBytesTotal))
 }
 
 // MetricsStart the remote control server if configured

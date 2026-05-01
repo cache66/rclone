@@ -356,7 +356,7 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 			return nil
 		}
 		task := newResumeFileTask(nextTaskID, batch, batchStartFrames, batchCommitFrames)
-		resume.RecordFileTaskCreated()
+		resume.RecordFileTaskCreated(task.meta.FileCount, task.meta.ByteCount)
 		task.meta.Status = resume.FileTaskRunning
 		inflight = append(inflight, task.meta)
 		inflightCount++
@@ -583,6 +583,7 @@ func (s *syncCopyMove) runResumeObjectScan(store *resume.Store, snapshot *resume
 		segment := current
 		segment.meta.Status = resume.ObjectSegmentRunning
 		segment.meta.ObjectCount = len(segment.tasks)
+		resume.RecordObjectSegmentCreated(segment.meta.ObjectCount, segment.meta.ByteCount)
 		inflight = append(inflight, segment.meta)
 		inflightCount++
 		if err := persistObjectScan(false); err != nil {
@@ -633,7 +634,13 @@ func (s *syncCopyMove) runResumeObjectScan(store *resume.Store, snapshot *resume
 	}
 
 	advanceFrontier := func() error {
-		for _, result := range resumeObjectFrontierReady(frontierSegmentID, pending) {
+		committedSegments := 0
+		ready := resumeObjectFrontierReady(frontierSegmentID, pending)
+		if len(ready) == 0 {
+			resume.RecordObjectFrontierCommit(0, len(pending), len(inflight), false)
+			return persistObjectScan(false)
+		}
+		for _, result := range ready {
 			segmentID := result.segment.SegmentID
 			if result.segment.Status == resume.ObjectSegmentFailed {
 				if err := commitFailureBatch(result.failureCommits); err != nil {
@@ -642,6 +649,7 @@ func (s *syncCopyMove) runResumeObjectScan(store *resume.Store, snapshot *resume
 				delete(pending, segmentID)
 				popInflight(segmentID)
 				frontierBlocked = true
+				resume.RecordObjectFrontierCommit(committedSegments, len(pending), len(inflight), true)
 				return persistObjectScan(false)
 			}
 			if len(result.successCommits) > 0 {
@@ -658,7 +666,9 @@ func (s *syncCopyMove) runResumeObjectScan(store *resume.Store, snapshot *resume
 			frontierSegmentID = segmentID
 			delete(pending, segmentID)
 			popInflight(segmentID)
+			committedSegments++
 		}
+		resume.RecordObjectFrontierCommit(committedSegments, len(pending), len(inflight), false)
 		return persistObjectScan(false)
 	}
 
