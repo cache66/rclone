@@ -45,6 +45,9 @@ type resumeCollector struct {
 	fileFrontierBlockedTotal       *prometheus.Desc
 	fileFrontierInflight           *prometheus.Desc
 	fileFrontierPending            *prometheus.Desc
+	fileScanPagesTotal             *prometheus.Desc
+	fileScanDirectoriesTotal       *prometheus.Desc
+	fileTasksCreatedTotal          *prometheus.Desc
 }
 
 func newResumeCollector() *resumeCollector {
@@ -69,6 +72,12 @@ func newResumeCollector() *resumeCollector {
 			"Current number of in-flight file resume tasks tracked by the frontier", nil, nil),
 		fileFrontierPending: prometheus.NewDesc("rclone_resume_file_frontier_pending",
 			"Current number of pending completed file resume tasks waiting on the frontier", nil, nil),
+		fileScanPagesTotal: prometheus.NewDesc("rclone_resume_file_scan_pages_total",
+			"Number of file resume scan pages processed", nil, nil),
+		fileScanDirectoriesTotal: prometheus.NewDesc("rclone_resume_file_scan_directories_total",
+			"Number of file resume directory descents", nil, nil),
+		fileTasksCreatedTotal: prometheus.NewDesc("rclone_resume_file_tasks_created_total",
+			"Number of file resume tasks created", nil, nil),
 	}
 }
 
@@ -83,6 +92,9 @@ func (c *resumeCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.fileFrontierBlockedTotal
 	ch <- c.fileFrontierInflight
 	ch <- c.fileFrontierPending
+	ch <- c.fileScanPagesTotal
+	ch <- c.fileScanDirectoriesTotal
+	ch <- c.fileTasksCreatedTotal
 }
 
 func (c *resumeCollector) Collect(ch chan<- prometheus.Metric) {
@@ -97,6 +109,9 @@ func (c *resumeCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.fileFrontierBlockedTotal, prometheus.CounterValue, float64(m.FileFrontierBlockedTotal))
 	ch <- prometheus.MustNewConstMetric(c.fileFrontierInflight, prometheus.GaugeValue, float64(m.FileFrontierInflight))
 	ch <- prometheus.MustNewConstMetric(c.fileFrontierPending, prometheus.GaugeValue, float64(m.FileFrontierPending))
+	ch <- prometheus.MustNewConstMetric(c.fileScanPagesTotal, prometheus.CounterValue, float64(m.FileScanPagesTotal))
+	ch <- prometheus.MustNewConstMetric(c.fileScanDirectoriesTotal, prometheus.CounterValue, float64(m.FileScanDirectoriesTotal))
+	ch <- prometheus.MustNewConstMetric(c.fileTasksCreatedTotal, prometheus.CounterValue, float64(m.FileTasksCreatedTotal))
 }
 
 // MetricsStart the remote control server if configured

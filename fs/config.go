@@ -598,7 +598,7 @@ var ConfigOptionsInfo = Options{{
 	Groups:  "Copy",
 }, {
 	Name:    "resume_file_window_size",
-	Default: 3,
+	Default: 2,
 	Help:    "Maximum number of in-flight file resume tasks. Reserved for the lightweight file/NAS resume pipeline.",
 	Groups:  "Copy",
 }, {

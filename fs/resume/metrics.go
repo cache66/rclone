@@ -16,6 +16,9 @@ var resumeMetrics = struct {
 	fileFrontierBlockedTotal    atomic.Int64
 	fileFrontierInflight        atomic.Int64
 	fileFrontierPending         atomic.Int64
+	fileScanPagesTotal          atomic.Int64
+	fileScanDirectoriesTotal    atomic.Int64
+	fileTasksCreatedTotal       atomic.Int64
 }{}
 
 // MetricsSnapshot exposes lightweight resume diagnostics for Prometheus.
@@ -30,6 +33,9 @@ type MetricsSnapshot struct {
 	FileFrontierBlockedTotal     int64
 	FileFrontierInflight         int64
 	FileFrontierPending          int64
+	FileScanPagesTotal           int64
+	FileScanDirectoriesTotal     int64
+	FileTasksCreatedTotal        int64
 }
 
 // Metrics returns a copy of the current process-wide resume diagnostics.
@@ -45,6 +51,9 @@ func Metrics() MetricsSnapshot {
 		FileFrontierBlockedTotal:       resumeMetrics.fileFrontierBlockedTotal.Load(),
 		FileFrontierInflight:           resumeMetrics.fileFrontierInflight.Load(),
 		FileFrontierPending:            resumeMetrics.fileFrontierPending.Load(),
+		FileScanPagesTotal:             resumeMetrics.fileScanPagesTotal.Load(),
+		FileScanDirectoriesTotal:       resumeMetrics.fileScanDirectoriesTotal.Load(),
+		FileTasksCreatedTotal:          resumeMetrics.fileTasksCreatedTotal.Load(),
 	}
 }
 
@@ -70,4 +79,19 @@ func RecordFileFrontierCommit(committedTasks, pending, inflight int, blocked boo
 	}
 	resumeMetrics.fileFrontierPending.Store(int64(pending))
 	resumeMetrics.fileFrontierInflight.Store(int64(inflight))
+}
+
+// RecordFileScanPage increments the file scan page counter.
+func RecordFileScanPage() {
+	resumeMetrics.fileScanPagesTotal.Add(1)
+}
+
+// RecordFileScanDirectory increments the file directory descent counter.
+func RecordFileScanDirectory() {
+	resumeMetrics.fileScanDirectoriesTotal.Add(1)
+}
+
+// RecordFileTaskCreated increments the file task creation counter.
+func RecordFileTaskCreated() {
+	resumeMetrics.fileTasksCreatedTotal.Add(1)
 }

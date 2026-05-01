@@ -301,7 +301,11 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 	type dstDirListing struct {
 		byKey map[string]fs.DirEntry
 	}
+	type srcDirPageCache struct {
+		page resume.DirPage
+	}
 	dstListings := make(map[string]dstDirListing)
+	srcPages := make(map[string]srcDirPageCache)
 	if len(frames) == 0 {
 		frames = []resume.ScanFrame{{Dir: s.dir, DstDir: s.dir}}
 	}
@@ -323,6 +327,7 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 			return nil
 		}
 		task := newResumeFileTask(nextTaskID, batch, batchStartFrames, batchCommitFrames)
+		resume.RecordFileTaskCreated()
 		task.meta.Status = resume.FileTaskRunning
 		inflight = append(inflight, task.meta)
 		inflightCount++
@@ -361,12 +366,22 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 			break
 		}
 		frame := &frames[len(frames)-1]
-		srcPage, err := resume.ListDirPage(s.ctx, s.fsrc, frame.Dir, false, keyer.SrcKey, frame.ContinuationToken)
-		if err != nil {
-			return err
+		srcPageKey := frame.Dir + "\x00" + frame.ContinuationToken
+		srcPage, ok := srcPages[srcPageKey]
+		if !ok {
+			page, err := resume.ListDirPage(s.ctx, s.fsrc, frame.Dir, false, keyer.SrcKey, frame.ContinuationToken)
+			if err != nil {
+				return err
+			}
+			resume.RecordFileScanPage()
+			if !page.NativeOrder {
+				page.Entries = append(fs.DirEntries(nil), page.Entries...)
+				srcPages[srcPageKey] = srcDirPageCache{page: page}
+			}
+			srcPage = srcDirPageCache{page: page}
 		}
 		pageIndex := frame.PageIndex
-		if !srcPage.TokenAccepted {
+		if !srcPage.page.TokenAccepted {
 			frame.ContinuationToken = ""
 			frame.PageIndex = 0
 			pageIndex = 0
@@ -387,7 +402,7 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 			dstListings[listingKey] = dstListing
 		}
 		descended := false
-		for entryIndex, srcEntry := range srcPage.Entries {
+		for entryIndex, srcEntry := range srcPage.page.Entries {
 			matchKey := keyer.SrcKey(srcEntry)
 			cursorKey := resume.CursorKey(pageIndex, entryIndex)
 			if frame.LastDoneEntryKey != "" && cursorKey <= frame.LastDoneEntryKey {
@@ -395,15 +410,16 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 			}
 			switch x := srcEntry.(type) {
 			case fs.Directory:
+				resume.RecordFileScanDirectory()
 				nextDstDir, dirErr := s.handleResumeDirectory(x, dstListing.byKey[matchKey])
 				if dirErr != nil {
 					return dirErr
-				}
-				frame.LastDoneEntryKey = cursorKey
-				frames = append(frames, resume.ScanFrame{Dir: x.Remote(), DstDir: nextDstDir})
-				if err = persistFileScan(false, false); err != nil {
-					return err
-				}
+					}
+					frame.LastDoneEntryKey = cursorKey
+					frames = append(frames, resume.ScanFrame{Dir: x.Remote(), DstDir: nextDstDir})
+					if err := persistFileScan(false, false); err != nil {
+						return err
+					}
 				descended = true
 			case fs.Object:
 				// File/NAS resume now restores from the earliest uncommitted task
@@ -423,16 +439,16 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 				}
 				batchCommitFrames = append([]resume.ScanFrame(nil), frames...)
 				batchCommitFrames[len(batchCommitFrames)-1].LastDoneEntryKey = cursorKey
-				batch = append(batch, task)
-				if len(batch) >= resumeCopyCommitBatchSize || (!batchOpenedAt.IsZero() && time.Since(batchOpenedAt) >= resumeCopyCommitBatchInterval) {
-					if err = dispatchTask(); err != nil {
-						return err
-					}
-					for inflightCount >= windowSize && !frontierBlocked {
-						if err = waitForOne(); err != nil {
+					batch = append(batch, task)
+					if len(batch) >= resumeCopyCommitBatchSize || (!batchOpenedAt.IsZero() && time.Since(batchOpenedAt) >= resumeCopyCommitBatchInterval) {
+						if err := dispatchTask(); err != nil {
 							return err
 						}
-					}
+						for inflightCount >= windowSize && !frontierBlocked {
+							if err := waitForOne(); err != nil {
+								return err
+							}
+						}
 				}
 			default:
 				return fmt.Errorf("unsupported source entry %T", srcEntry)
@@ -444,20 +460,21 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 		if descended {
 			continue
 		}
-		if srcPage.NextContinuationToken != "" {
-			frame.ContinuationToken = srcPage.NextContinuationToken
-			frame.PageIndex = pageIndex + 1
-			if err = persistFileScan(false, false); err != nil {
+			if srcPage.page.NextContinuationToken != "" {
+				frame.ContinuationToken = srcPage.page.NextContinuationToken
+				frame.PageIndex = pageIndex + 1
+				if err := persistFileScan(false, false); err != nil {
+					return err
+				}
+				continue
+			}
+			delete(dstListings, listingKey)
+			delete(srcPages, srcPageKey)
+			frames = frames[:len(frames)-1]
+			if err := persistFileScan(false, len(frames) == 0 && inflightCount == 0 && len(batch) == 0); err != nil {
 				return err
 			}
-			continue
 		}
-		delete(dstListings, listingKey)
-		frames = frames[:len(frames)-1]
-		if err = persistFileScan(false, len(frames) == 0 && inflightCount == 0 && len(batch) == 0); err != nil {
-			return err
-		}
-	}
 
 	if !frontierBlocked {
 		if err := dispatchTask(); err != nil {
@@ -1300,7 +1317,7 @@ func (s *syncCopyMove) resumeFileWindowSize() int {
 	if s.ci.ResumeFileWindowSize > 0 {
 		return s.ci.ResumeFileWindowSize
 	}
-	return 3
+	return 2
 }
 
 func (s *syncCopyMove) resumeFileFrontierTaskID(snapshot *resume.Snapshot) int64 {
