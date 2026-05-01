@@ -33,10 +33,10 @@ Resume V1 当前定位为：
 
 建议确认以下文件已在版本中：
 
-- [resume.go](/my/new/rclone/fs/sync/resume.go)
-- [rc.go](/my/new/rclone/fs/sync/rc.go)
-- [types.go](/my/new/rclone/fs/resume/types.go)
-- [store.go](/my/new/rclone/fs/resume/store.go)
+- [resume.go](/my/eas-monorepo/rclone/fs/sync/resume.go)
+- [rc.go](/my/eas-monorepo/rclone/fs/sync/rc.go)
+- [types.go](/my/eas-monorepo/rclone/fs/resume/types.go)
+- [store.go](/my/eas-monorepo/rclone/fs/resume/store.go)
 
 ## 二、配置检查
 
@@ -83,7 +83,7 @@ go test ./backend/s3 -run 'Resume|resume'
 ### 真实场景脚本
 
 ```bash
-cd /my/new/rclone
+cd /my/eas-monorepo/rclone
 ./bin/test-resume-v1.sh
 ```
 

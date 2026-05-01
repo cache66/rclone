@@ -193,6 +193,9 @@ func (s *Store) CommitSuccess(commit SuccessCommit) (snapshot Snapshot, err erro
 	err = s.db.Do(true, bucketOp(func(ctx context.Context, b kv.Bucket) error {
 		return s.commitSuccessLocked(b, commit, &snapshot)
 	}))
+	if err == nil {
+		RecordCommittedTotals(snapshot.Totals.Files, snapshot.Totals.Bytes)
+	}
 	return snapshot, err
 }
 
@@ -221,6 +224,7 @@ func (s *Store) CommitSuccessBatch(commit SuccessBatchCommit) (snapshot Snapshot
 	}))
 	if err == nil {
 		recordCommitSuccessBatch(len(commit.Commits), time.Since(started))
+		RecordCommittedTotals(snapshot.Totals.Files, snapshot.Totals.Bytes)
 	}
 	if errors.Is(err, kv.ErrEmpty) {
 		return Snapshot{}, nil
@@ -297,6 +301,9 @@ func (s *Store) CommitFailure(commit FailureCommit) (snapshot Snapshot, err erro
 	err = s.db.Do(true, bucketOp(func(ctx context.Context, b kv.Bucket) error {
 		return s.commitFailureLocked(b, commit, &snapshot)
 	}))
+	if err == nil {
+		RecordCommittedTotals(snapshot.Totals.Files, snapshot.Totals.Bytes)
+	}
 	return snapshot, err
 }
 
@@ -335,9 +342,13 @@ func (s *Store) commitFailureLocked(b kv.Bucket, commit FailureCommit, snapshot 
 
 // Clear removes the persisted state for the current job ID.
 func (s *Store) Clear() error {
-	return s.db.Do(true, bucketOp(func(ctx context.Context, b kv.Bucket) error {
+	err := s.db.Do(true, bucketOp(func(ctx context.Context, b kv.Bucket) error {
 		return deletePrefix(b, s.prefix(""))
 	}))
+	if err == nil {
+		RecordCommittedTotals(0, 0)
+	}
+	return err
 }
 
 func (s *Store) writeSnapshot(snapshot Snapshot) error {

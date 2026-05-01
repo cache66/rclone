@@ -130,6 +130,7 @@ func (s *syncCopyMove) resumeRun() error {
 	if err != nil {
 		return err
 	}
+	resume.RecordCommittedTotals(snapshot.Totals.Files, snapshot.Totals.Bytes)
 	resume.RestoreAccounting(s.ctx, snapshot)
 	if err = store.ResetRunCounters(time.Now()); err != nil {
 		return err
@@ -496,6 +497,7 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 				batchCommitFrames[len(batchCommitFrames)-1].LastDoneEntryKey = cursorKey
 				batch = append(batch, task)
 				batchBytes += resumeCopyTaskSize(task)
+				frame.LastDoneEntryKey = cursorKey
 				if resumeShouldDispatchBySize(len(batch), batchBytes, resumeCopyCommitBatchSize, fileMaxBytes) ||
 					(!batchOpenedAt.IsZero() && time.Since(batchOpenedAt) >= resumeCopyCommitBatchInterval) {
 					if err := dispatchBatchAndThrottle(); err != nil {
@@ -638,6 +640,15 @@ func (s *syncCopyMove) runResumeObjectScan(store *resume.Store, snapshot *resume
 		}
 		inflight = next
 	}
+	objectInflightAfter := func(segmentID int64) []resume.ObjectSegment {
+		next := make([]resume.ObjectSegment, 0, len(inflight))
+		for _, segment := range inflight {
+			if segment.SegmentID != segmentID {
+				next = append(next, segment)
+			}
+		}
+		return next
+	}
 
 	advanceFrontier := func() error {
 		committedSegments := 0
@@ -658,8 +669,17 @@ func (s *syncCopyMove) runResumeObjectScan(store *resume.Store, snapshot *resume
 				resume.RecordObjectFrontierCommit(committedSegments, len(pending), len(inflight), true)
 				return persistObjectScan(false)
 			}
+			nextLastCommittedKey := result.segment.EndKey
+			nextFrontierSegmentID := segmentID
+			nextInflight := objectInflightAfter(segmentID)
+			successScan := s.resumeObjectScanState(snapshot, state.RootPrefix, nextLastCommittedKey, lastScannedKey, nextFrontierSegmentID, nextInflight, false)
 			if len(result.successCommits) > 0 {
-				newSnapshot, commitErr := store.CommitSuccessBatch(resume.SuccessBatchCommit{Commits: result.successCommits})
+				commits := make([]resume.SuccessCommit, 0, len(result.successCommits))
+				for _, commit := range result.successCommits {
+					commit.Scan = successScan
+					commits = append(commits, commit)
+				}
+				newSnapshot, commitErr := store.CommitSuccessBatch(resume.SuccessBatchCommit{Commits: commits})
 				if commitErr != nil {
 					return commitErr
 				}
@@ -667,11 +687,16 @@ func (s *syncCopyMove) runResumeObjectScan(store *resume.Store, snapshot *resume
 					return err
 				}
 				*snapshot = newSnapshot
+			} else {
+				snapshot.Scan = successScan
+				if err := store.SaveScan(snapshot.Scan); err != nil {
+					return err
+				}
 			}
-			lastCommittedKey = result.segment.EndKey
-			frontierSegmentID = segmentID
+			lastCommittedKey = nextLastCommittedKey
+			frontierSegmentID = nextFrontierSegmentID
 			delete(pending, segmentID)
-			popInflight(segmentID)
+			inflight = nextInflight
 			committedSegments++
 		}
 		resume.RecordObjectFrontierCommit(committedSegments, len(pending), len(inflight), false)
@@ -988,8 +1013,24 @@ func (s *syncCopyMove) commitResumeReadyFileTasks(store *resume.Store, snapshot 
 	}
 
 	if len(successReady) > 0 {
-		lastSuccess := successReady[len(successReady)-1]
-		successScan := s.resumeFileScanState(snapshot, lastSuccess.commitFrames, nextFrontierTaskID, remainingInflight, false)
+		nextSuccessFrontierTaskID := nextFrontierTaskID
+		remainingAfterSuccess := append([]resume.FileTask(nil), remainingInflight...)
+		popSuccessInflight := func(taskID int64) {
+			next := remainingAfterSuccess[:0]
+			for _, task := range remainingAfterSuccess {
+				if task.TaskID != taskID {
+					next = append(next, task)
+				}
+			}
+			remainingAfterSuccess = next
+		}
+		for _, result := range successReady {
+			nextSuccessFrontierTaskID = result.task.TaskID
+			popSuccessInflight(result.task.TaskID)
+		}
+		successScan := s.resumeFileScanState(snapshot,
+			s.resumeFileCheckpointFrames(snapshot, successReady, remainingAfterSuccess),
+			nextSuccessFrontierTaskID, remainingAfterSuccess, false)
 		commits := make([]resume.SuccessCommit, 0)
 		for _, result := range successReady {
 			for _, commit := range result.successCommits {
@@ -1010,13 +1051,18 @@ func (s *syncCopyMove) commitResumeReadyFileTasks(store *resume.Store, snapshot 
 				return nextFrontierTaskID, remainingInflight, false, syncErr
 			}
 			*snapshot = newSnapshot
+		} else {
+			snapshot.Scan = successScan
+			if saveErr := store.SaveScan(snapshot.Scan); saveErr != nil {
+				return nextFrontierTaskID, remainingInflight, false, saveErr
+			}
 		}
 		for _, result := range successReady {
-			nextFrontierTaskID = result.task.TaskID
 			delete(pending, result.task.TaskID)
-			popInflight(result.task.TaskID)
 			committedTasks++
 		}
+		nextFrontierTaskID = nextSuccessFrontierTaskID
+		remainingInflight = remainingAfterSuccess
 	}
 
 	if failureResult != nil {
@@ -1056,9 +1102,11 @@ func (s *syncCopyMove) commitResumeReadyFileTasks(store *resume.Store, snapshot 
 		return nextFrontierTaskID, remainingInflight, true, nil
 	}
 
-	snapshot.Scan = s.resumeFileScanState(snapshot, s.resumeFileCheckpointFrames(snapshot, successReady, remainingInflight), nextFrontierTaskID, remainingInflight, false)
-	if err := store.SaveScan(snapshot.Scan); err != nil {
-		return nextFrontierTaskID, remainingInflight, false, err
+	if len(successReady) == 0 {
+		snapshot.Scan = s.resumeFileScanState(snapshot, s.resumeFileCheckpointFrames(snapshot, successReady, remainingInflight), nextFrontierTaskID, remainingInflight, false)
+		if err := store.SaveScan(snapshot.Scan); err != nil {
+			return nextFrontierTaskID, remainingInflight, false, err
+		}
 	}
 	resume.RecordFileFrontierCommit(committedTasks, len(pending), len(remainingInflight), false)
 	return nextFrontierTaskID, remainingInflight, false, nil

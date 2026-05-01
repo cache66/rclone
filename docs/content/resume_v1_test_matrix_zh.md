@@ -32,12 +32,12 @@ go test ./backend/s3 -run 'Resume|resume'
 
 脚本位置：
 
-- [test-resume-v1.sh](/my/new/rclone/bin/test-resume-v1.sh)
+- [test-resume-v1.sh](/my/eas-monorepo/rclone/bin/test-resume-v1.sh)
 
 运行方式：
 
 ```bash
-cd /my/new/rclone
+cd /my/eas-monorepo/rclone
 ./bin/test-resume-v1.sh
 ```
 
@@ -47,41 +47,41 @@ cd /my/new/rclone
 
 | 编号 | 场景 | 脚本覆盖 | 对应 Go 测试文件 | 重点验证 | 出问题先看哪里 |
 |---|---|---|---|---|---|
-| 1 | 本地文件系统扫描/传输中断后继续 | 场景 1 | [resume_test.go](/my/new/rclone/fs/sync/resume_test.go) | 中断后继续、最终不漏文件 | 先看脚本，再看单测 |
-| 2 | 失败文件记录与下次优先重试 | 场景 2 | [resume_test.go](/my/new/rclone/fs/sync/resume_test.go) | 失败记录、下次优先重试 | 两边都看 |
-| 3 | `status` / `clear` 接口 | 场景 3 | [rc_test.go](/my/new/rclone/fs/sync/rc_test.go) | 状态查看、状态清理 | 先看单测 |
-| 4 | 失败上限超限后停止并保留状态 | 场景 4 | [resume_test.go](/my/new/rclone/fs/sync/resume_test.go) | 超限停止、保留状态 | 两边都看 |
-| 5 | `status` 统计字段校验 | 场景 5 | [accounting_restore_test.go](/my/new/rclone/fs/resume/accounting_restore_test.go), [resume_test.go](/my/new/rclone/fs/sync/resume_test.go) | `totals.files`、`totals.bytes` 恢复 | 先看脚本 |
-| 6 | 多次连续中断恢复 | 场景 6 | [resume_test.go](/my/new/rclone/fs/sync/resume_test.go) | 中断两次以上仍能完成 | 先看脚本 |
-| 7 | 目标端已有部分文件 | 场景 7 | [resume_test.go](/my/new/rclone/fs/sync/resume_test.go) | 目标端已有文件时恢复不误传 | 先看脚本 |
+| 1 | 本地文件系统扫描/传输中断后继续 | 场景 1 | [resume_test.go](/my/eas-monorepo/rclone/fs/sync/resume_test.go) | 中断后继续、最终不漏文件 | 先看脚本，再看单测 |
+| 2 | 失败文件记录与下次优先重试 | 场景 2 | [resume_test.go](/my/eas-monorepo/rclone/fs/sync/resume_test.go) | 失败记录、下次优先重试 | 两边都看 |
+| 3 | `status` / `clear` 接口 | 场景 3 | [rc_test.go](/my/eas-monorepo/rclone/fs/sync/rc_test.go) | 状态查看、状态清理 | 先看单测 |
+| 4 | 失败上限超限后停止并保留状态 | 场景 4 | [resume_test.go](/my/eas-monorepo/rclone/fs/sync/resume_test.go) | 超限停止、保留状态 | 两边都看 |
+| 5 | `status` 统计字段校验 | 场景 5 | [accounting_restore_test.go](/my/eas-monorepo/rclone/fs/resume/accounting_restore_test.go), [resume_test.go](/my/eas-monorepo/rclone/fs/sync/resume_test.go) | `totals.files`、`totals.bytes` 恢复 | 先看脚本 |
+| 6 | 多次连续中断恢复 | 场景 6 | [resume_test.go](/my/eas-monorepo/rclone/fs/sync/resume_test.go) | 中断两次以上仍能完成 | 先看脚本 |
+| 7 | 目标端已有部分文件 | 场景 7 | [resume_test.go](/my/eas-monorepo/rclone/fs/sync/resume_test.go) | 目标端已有文件时恢复不误传 | 先看脚本 |
 | 8 | 特殊文件名 | 场景 8 | 无专门 Go 单测 | 中文、空格、大小写、特殊符号 | 先看脚本 |
 | 9 | 较大规模小文件 | 场景 9 | 无专门 Go 单测 | 大量小文件恢复稳定性 | 先看脚本 |
-| 10 | 失败文件反复失败 | 场景 10 | [resume_test.go](/my/new/rclone/fs/sync/resume_test.go), [store_test.go](/my/new/rclone/fs/resume/store_test.go) | 失败次数递增、失败状态稳定 | 两边都看 |
-| 11 | `resume_id` 隔离 | 场景 11 | [rc_test.go](/my/new/rclone/fs/sync/rc_test.go), [resume_test.go](/my/new/rclone/fs/sync/resume_test.go) | 不同 job 状态隔离 | 两边都看 |
+| 10 | 失败文件反复失败 | 场景 10 | [resume_test.go](/my/eas-monorepo/rclone/fs/sync/resume_test.go), [store_test.go](/my/eas-monorepo/rclone/fs/resume/store_test.go) | 失败次数递增、失败状态稳定 | 两边都看 |
+| 11 | `resume_id` 隔离 | 场景 11 | [rc_test.go](/my/eas-monorepo/rclone/fs/sync/rc_test.go), [resume_test.go](/my/eas-monorepo/rclone/fs/sync/resume_test.go) | 不同 job 状态隔离 | 两边都看 |
 | 12 | `SIGKILL` 强制中断后恢复 | 场景 12 | 无专门 Go 单测 | 非温和中断后的恢复 | 先看脚本 |
-| 13 | `resume` 状态损坏 | 场景 13 | [store_test.go](/my/new/rclone/fs/resume/store_test.go) | 状态损坏时不崩溃、可恢复 | 先看单测 |
+| 13 | `resume` 状态损坏 | 场景 13 | [store_test.go](/my/eas-monorepo/rclone/fs/resume/store_test.go) | 状态损坏时不崩溃、可恢复 | 先看单测 |
 | 14 | 大文件与混合文件集 | 场景 14 | 无专门 Go 单测 | 大文件重传、小文件不重复 | 先看脚本 |
-| 15 | S3 源中断后继续 | 场景 15 | [s3_internal_test.go](/my/new/rclone/backend/s3/s3_internal_test.go), [resume_test.go](/my/new/rclone/fs/sync/resume_test.go) | continuation token、S3 真实恢复 | 两边都看 |
+| 15 | S3 源中断后继续 | 场景 15 | [s3_internal_test.go](/my/eas-monorepo/rclone/backend/s3/s3_internal_test.go), [resume_test.go](/my/eas-monorepo/rclone/fs/sync/resume_test.go) | continuation token、S3 真实恢复 | 两边都看 |
 
 ## Go 测试文件职责
 
 ### Resume 基础层
 
-- [store_test.go](/my/new/rclone/fs/resume/store_test.go)
+- [store_test.go](/my/eas-monorepo/rclone/fs/resume/store_test.go)
   - 持久化状态读写
   - 失败记录与成功恢复
   - 损坏 meta / 空状态边界
 
-- [work_test.go](/my/new/rclone/fs/resume/work_test.go)
+- [work_test.go](/my/eas-monorepo/rclone/fs/resume/work_test.go)
   - `WorkKey`
   - `EntryFingerprint`
 
-- [accounting_restore_test.go](/my/new/rclone/fs/resume/accounting_restore_test.go)
+- [accounting_restore_test.go](/my/eas-monorepo/rclone/fs/resume/accounting_restore_test.go)
   - 恢复统计与历史事件
 
 ### Copy Resume 主逻辑
 
-- [resume_test.go](/my/new/rclone/fs/sync/resume_test.go)
+- [resume_test.go](/my/eas-monorepo/rclone/fs/sync/resume_test.go)
   - 目录栈恢复
   - 已完成文件跳过
   - 失败重试
@@ -90,21 +90,21 @@ cd /my/new/rclone
 
 ### 状态接口
 
-- [rc_test.go](/my/new/rclone/fs/sync/rc_test.go)
+- [rc_test.go](/my/eas-monorepo/rclone/fs/sync/rc_test.go)
   - `sync/resume/status`
   - `sync/resume/clear`
   - `jobId` 与 `srcFs + dstFs` 推导
 
 ### S3 分页恢复
 
-- [s3_internal_test.go](/my/new/rclone/backend/s3/s3_internal_test.go)
+- [s3_internal_test.go](/my/eas-monorepo/rclone/backend/s3/s3_internal_test.go)
   - continuation token 正常恢复
   - token 无效回退恢复
   - S3 元信息变化不影响 copy resume 兼容性
 
 ### 非支持命令边界
 
-- [check_resume_test.go](/my/new/rclone/fs/operations/check_resume_test.go)
+- [check_resume_test.go](/my/eas-monorepo/rclone/fs/operations/check_resume_test.go)
   - `check` 明确拒绝 `--resume`
 
 ## 排查建议

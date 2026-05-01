@@ -29,6 +29,8 @@ var resumeMetrics = struct {
 	fileTasksCreatedTotal           atomic.Int64
 	fileTaskFilesTotal              atomic.Int64
 	fileTaskBytesTotal              atomic.Int64
+	committedFiles                  atomic.Int64
+	committedBytes                  atomic.Int64
 }{}
 
 // MetricsSnapshot exposes lightweight resume diagnostics for Prometheus.
@@ -56,6 +58,8 @@ type MetricsSnapshot struct {
 	FileTasksCreatedTotal           int64
 	FileTaskFilesTotal              int64
 	FileTaskBytesTotal              int64
+	CommittedFiles                  int64
+	CommittedBytes                  int64
 }
 
 // Metrics returns a copy of the current process-wide resume diagnostics.
@@ -84,7 +88,17 @@ func Metrics() MetricsSnapshot {
 		FileTasksCreatedTotal:           resumeMetrics.fileTasksCreatedTotal.Load(),
 		FileTaskFilesTotal:              resumeMetrics.fileTaskFilesTotal.Load(),
 		FileTaskBytesTotal:              resumeMetrics.fileTaskBytesTotal.Load(),
+		CommittedFiles:                  resumeMetrics.committedFiles.Load(),
+		CommittedBytes:                  resumeMetrics.committedBytes.Load(),
 	}
+}
+
+// RecordCommittedTotals publishes the safely persisted resume totals. These
+// counters reflect only the contiguous frontier that has been committed to the
+// resume store, not speculative or out-of-order completed work.
+func RecordCommittedTotals(files, bytes int64) {
+	resumeMetrics.committedFiles.Store(files)
+	resumeMetrics.committedBytes.Store(bytes)
 }
 
 func recordSaveScan(duration time.Duration) {

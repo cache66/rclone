@@ -475,6 +475,69 @@ func TestCommitResumeReadyFileTasksPersistsRemainingInflightStart(t *testing.T) 
 	require.NotNil(t, snapshot.Scan.FileTree)
 	require.Len(t, snapshot.Scan.FileTree.Frames, 1)
 	assert.Equal(t, "task-2-start", snapshot.Scan.FileTree.Frames[0].LastEntry)
+
+	persisted := copyResumeSnapshot(t, store)
+	require.NotNil(t, persisted.Scan.FileTree)
+	assert.Equal(t, int64(1), persisted.Scan.FileTree.Window.CommitFrontierTaskID)
+	require.Len(t, persisted.Scan.FileTree.Window.InflightTasks, 1)
+	assert.Equal(t, int64(2), persisted.Scan.FileTree.Window.InflightTasks[0].TaskID)
+	require.Len(t, persisted.Scan.FileTree.Frames, 1)
+	assert.Equal(t, "task-2-start", persisted.Scan.FileTree.Frames[0].LastEntry)
+}
+
+func TestCommitResumeReadyFileTasksPersistsEmptySuccessTaskScan(t *testing.T) {
+	ctx := newCopyResumeTestContext(t, "copy-resume-file-frontier-empty-success", 1)
+	meta := resume.Meta{
+		FormatVersion: resume.FormatVersion,
+		JobID:         fs.GetConfig(ctx).ResumeID,
+		Op:            "copy",
+		SrcConfig:     "src",
+		DstConfig:     "dst",
+	}
+	initialScan := resume.ScanState{
+		Phase:  resume.PhaseCopySource,
+		Target: "src",
+		Frames: []resume.ScanFrame{{Dir: "", DstDir: ""}},
+	}
+	store, err := resume.Open(ctx, meta.JobID)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, store.Close(true))
+	}()
+	snapshot, _, err := store.LoadOrInit(meta, initialScan)
+	require.NoError(t, err)
+
+	s := &syncCopyMove{ctx: ctx, ci: fs.GetConfig(ctx)}
+	inflight := []resume.FileTask{{TaskID: 1}}
+	pending := map[int64]resumeFileTaskResult{
+		1: {
+			task: resume.FileTask{TaskID: 1, Status: resume.FileTaskDone, EndFile: "empty-dir"},
+			commitFrames: []resume.ScanFrame{{
+				Dir:              "",
+				DstDir:           "",
+				LastDoneEntryKey: "task-1-commit",
+			}},
+		},
+	}
+
+	nextFrontier, remaining, blocked, err := s.commitResumeReadyFileTasks(store, &snapshot, 0, pending, inflight)
+	require.NoError(t, err)
+	assert.False(t, blocked)
+	assert.Equal(t, int64(1), nextFrontier)
+	assert.Empty(t, remaining)
+	assert.Empty(t, pending)
+	assert.Equal(t, int64(0), snapshot.Totals.Files)
+	require.NotNil(t, snapshot.Scan.FileTree)
+	assert.Equal(t, int64(1), snapshot.Scan.FileTree.Window.CommitFrontierTaskID)
+	require.Len(t, snapshot.Scan.FileTree.Frames, 1)
+	assert.Equal(t, "task-1-commit", snapshot.Scan.FileTree.Frames[0].LastEntry)
+
+	persisted := copyResumeSnapshot(t, store)
+	require.NotNil(t, persisted.Scan.FileTree)
+	assert.Equal(t, int64(1), persisted.Scan.FileTree.Window.CommitFrontierTaskID)
+	assert.Empty(t, persisted.Scan.FileTree.Window.InflightTasks)
+	require.Len(t, persisted.Scan.FileTree.Frames, 1)
+	assert.Equal(t, "task-1-commit", persisted.Scan.FileTree.Frames[0].LastEntry)
 }
 
 func TestCopyDirResumeRestoresDeepDirectoryStack(t *testing.T) {
@@ -662,6 +725,40 @@ func TestResumeLegacyFileFramesPrefersEarliestInflightTask(t *testing.T) {
 	frames := s.resumeLegacyFileFrames(snapshot)
 	require.Len(t, frames, 1)
 	assert.Equal(t, resume.CursorKey(0, 0), frames[0].LastDoneEntryKey)
+}
+
+func TestCopyDirResumeFailedTaskStartsAfterCommittedFile(t *testing.T) {
+	ctx := newCopyResumeTestContext(t, "copy-resume-failed-task-start", 1)
+	ci := fs.GetConfig(ctx)
+	ci.ResumeFileTaskMaxBytes = 1
+	ci.ResumeFileWindowSize = 2
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	writeCopyResumeFile(t, srcDir, "a-ok.txt", "ok")
+	writeCopyResumeFile(t, srcDir, "b-fail.txt", "fail")
+	writeCopyResumeFile(t, srcDir, "c-later.txt", "later")
+
+	baseSrc := newCopyResumeLocalFs(t, ctx, srcDir)
+	fsrc := &copyResumeFailingFs{
+		Fs:   baseSrc,
+		fail: map[string]error{"b-fail.txt": errCopyResumeInjected},
+	}
+	fdst := newCopyResumeLocalFs(t, ctx, dstDir)
+	store := pinCopyResumeStore(t, ctx)
+
+	accounting.GlobalStats().ResetCounters()
+	defer accounting.GlobalStats().ResetCounters()
+
+	err := CopyDir(ctx, fdst, fsrc, false)
+	require.ErrorContains(t, err, errCopyResumeInjected.Error())
+
+	snapshot := copyResumeSnapshot(t, store)
+	require.NotNil(t, snapshot.Scan.FileTree)
+	require.Len(t, snapshot.Scan.FileTree.Frames, 1)
+	assert.Equal(t, resume.CursorKey(0, 0), snapshot.Scan.FileTree.Frames[0].LastEntry)
+	assert.Equal(t, int64(1), snapshot.Totals.Files)
+	assert.Equal(t, int64(1), snapshot.Scan.FileTree.Window.CommitFrontierTaskID)
 }
 
 func TestCopyDirResumeRestoresEmptyDirectoriesAndDirModTimes(t *testing.T) {

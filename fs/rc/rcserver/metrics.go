@@ -58,6 +58,8 @@ type resumeCollector struct {
 	fileTasksCreatedTotal           *prometheus.Desc
 	fileTaskFilesTotal              *prometheus.Desc
 	fileTaskBytesTotal              *prometheus.Desc
+	committedFiles                  *prometheus.Desc
+	committedBytes                  *prometheus.Desc
 }
 
 func newResumeCollector() *resumeCollector {
@@ -108,6 +110,10 @@ func newResumeCollector() *resumeCollector {
 			"Number of files assigned to created file resume tasks", nil, nil),
 		fileTaskBytesTotal: prometheus.NewDesc("rclone_resume_file_task_bytes_total",
 			"Number of bytes assigned to created file resume tasks", nil, nil),
+		committedFiles: prometheus.NewDesc("rclone_resume_committed_files",
+			"Number of files safely committed to the resume store contiguous frontier", nil, nil),
+		committedBytes: prometheus.NewDesc("rclone_resume_committed_bytes",
+			"Number of bytes safely committed to the resume store contiguous frontier", nil, nil),
 	}
 }
 
@@ -135,6 +141,8 @@ func (c *resumeCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.fileTasksCreatedTotal
 	ch <- c.fileTaskFilesTotal
 	ch <- c.fileTaskBytesTotal
+	ch <- c.committedFiles
+	ch <- c.committedBytes
 }
 
 func (c *resumeCollector) Collect(ch chan<- prometheus.Metric) {
@@ -162,6 +170,8 @@ func (c *resumeCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.fileTasksCreatedTotal, prometheus.CounterValue, float64(m.FileTasksCreatedTotal))
 	ch <- prometheus.MustNewConstMetric(c.fileTaskFilesTotal, prometheus.CounterValue, float64(m.FileTaskFilesTotal))
 	ch <- prometheus.MustNewConstMetric(c.fileTaskBytesTotal, prometheus.CounterValue, float64(m.FileTaskBytesTotal))
+	ch <- prometheus.MustNewConstMetric(c.committedFiles, prometheus.GaugeValue, float64(m.CommittedFiles))
+	ch <- prometheus.MustNewConstMetric(c.committedBytes, prometheus.GaugeValue, float64(m.CommittedBytes))
 }
 
 // MetricsStart the remote control server if configured
