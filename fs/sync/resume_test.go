@@ -137,6 +137,25 @@ func TestCopyDirResumeReusesDestinationListingAcrossSourcePages(t *testing.T) {
 	assert.Equal(t, "d", readCopyResumeFile(t, dstDir, "d.txt"))
 }
 
+func TestResumeObjectFrontierReadyHonorsContiguousPrefix(t *testing.T) {
+	pending := map[int64]resumeObjectSegmentResult{
+		2: {segment: resume.ObjectSegment{SegmentID: 2, Status: resume.ObjectSegmentDone, EndKey: "b.txt"}},
+		3: {segment: resume.ObjectSegment{SegmentID: 3, Status: resume.ObjectSegmentDone, EndKey: "c.txt"}},
+	}
+	assert.Empty(t, resumeObjectFrontierReady(0, pending))
+
+	pending[1] = resumeObjectSegmentResult{segment: resume.ObjectSegment{SegmentID: 1, Status: resume.ObjectSegmentDone, EndKey: "a.txt"}}
+	ready := resumeObjectFrontierReady(0, pending)
+	require.Len(t, ready, 3)
+	assert.Equal(t, int64(1), ready[0].segment.SegmentID)
+	assert.Equal(t, int64(3), ready[2].segment.SegmentID)
+
+	pending[4] = resumeObjectSegmentResult{segment: resume.ObjectSegment{SegmentID: 4, Status: resume.ObjectSegmentFailed, EndKey: "d.txt"}}
+	ready = resumeObjectFrontierReady(3, pending)
+	require.Len(t, ready, 1)
+	assert.Equal(t, resume.ObjectSegmentFailed, ready[0].segment.Status)
+}
+
 func TestCopyDirResumeRestoresDeepDirectoryStack(t *testing.T) {
 	ctx := newCopyResumeTestContext(t, "copy-resume-deep-stack", 1)
 	srcDir := t.TempDir()
