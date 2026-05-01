@@ -361,6 +361,21 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 		return nil
 	}
 
+	dispatchBatchBeforeCursorAdvance := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := dispatchTask(); err != nil {
+			return err
+		}
+		for inflightCount >= windowSize && !frontierBlocked {
+			if err := waitForOne(); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
 	for len(frames) > 0 {
 		if frontierBlocked {
 			break
@@ -410,16 +425,22 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 			}
 			switch x := srcEntry.(type) {
 			case fs.Directory:
+				if err := dispatchBatchBeforeCursorAdvance(); err != nil {
+					return err
+				}
+				if frontierBlocked {
+					break
+				}
 				resume.RecordFileScanDirectory()
 				nextDstDir, dirErr := s.handleResumeDirectory(x, dstListing.byKey[matchKey])
 				if dirErr != nil {
 					return dirErr
-					}
-					frame.LastDoneEntryKey = cursorKey
-					frames = append(frames, resume.ScanFrame{Dir: x.Remote(), DstDir: nextDstDir})
-					if err := persistFileScan(false, false); err != nil {
-						return err
-					}
+				}
+				frame.LastDoneEntryKey = cursorKey
+				frames = append(frames, resume.ScanFrame{Dir: x.Remote(), DstDir: nextDstDir})
+				if err := persistFileScan(false, false); err != nil {
+					return err
+				}
 				descended = true
 			case fs.Object:
 				// File/NAS resume now restores from the earliest uncommitted task
@@ -439,16 +460,11 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 				}
 				batchCommitFrames = append([]resume.ScanFrame(nil), frames...)
 				batchCommitFrames[len(batchCommitFrames)-1].LastDoneEntryKey = cursorKey
-					batch = append(batch, task)
-					if len(batch) >= resumeCopyCommitBatchSize || (!batchOpenedAt.IsZero() && time.Since(batchOpenedAt) >= resumeCopyCommitBatchInterval) {
-						if err := dispatchTask(); err != nil {
-							return err
-						}
-						for inflightCount >= windowSize && !frontierBlocked {
-							if err := waitForOne(); err != nil {
-								return err
-							}
-						}
+				batch = append(batch, task)
+				if len(batch) >= resumeCopyCommitBatchSize || (!batchOpenedAt.IsZero() && time.Since(batchOpenedAt) >= resumeCopyCommitBatchInterval) {
+					if err := dispatchBatchBeforeCursorAdvance(); err != nil {
+						return err
+					}
 				}
 			default:
 				return fmt.Errorf("unsupported source entry %T", srcEntry)
@@ -460,21 +476,33 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 		if descended {
 			continue
 		}
-			if srcPage.page.NextContinuationToken != "" {
-				frame.ContinuationToken = srcPage.page.NextContinuationToken
-				frame.PageIndex = pageIndex + 1
-				if err := persistFileScan(false, false); err != nil {
-					return err
-				}
-				continue
-			}
-			delete(dstListings, listingKey)
-			delete(srcPages, srcPageKey)
-			frames = frames[:len(frames)-1]
-			if err := persistFileScan(false, len(frames) == 0 && inflightCount == 0 && len(batch) == 0); err != nil {
+		if srcPage.page.NextContinuationToken != "" {
+			if err := dispatchBatchBeforeCursorAdvance(); err != nil {
 				return err
 			}
+			if frontierBlocked {
+				continue
+			}
+			frame.ContinuationToken = srcPage.page.NextContinuationToken
+			frame.PageIndex = pageIndex + 1
+			if err := persistFileScan(false, false); err != nil {
+				return err
+			}
+			continue
 		}
+		if err := dispatchBatchBeforeCursorAdvance(); err != nil {
+			return err
+		}
+		if frontierBlocked {
+			continue
+		}
+		delete(dstListings, listingKey)
+		delete(srcPages, srcPageKey)
+		frames = frames[:len(frames)-1]
+		if err := persistFileScan(false, len(frames) == 0 && inflightCount == 0 && len(batch) == 0); err != nil {
+			return err
+		}
+	}
 
 	if !frontierBlocked {
 		if err := dispatchTask(); err != nil {

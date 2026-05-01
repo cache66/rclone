@@ -137,6 +137,39 @@ func TestCopyDirResumeReusesDestinationListingAcrossSourcePages(t *testing.T) {
 	assert.Equal(t, "d", readCopyResumeFile(t, dstDir, "d.txt"))
 }
 
+func TestCopyDirResumePersistsPendingBatchBeforeDirectoryError(t *testing.T) {
+	ctx := newCopyResumeTestContext(t, "copy-resume-flush-before-dir-error", 1)
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+
+	writeCopyResumeFile(t, srcDir, "a-before.txt", "before")
+	writeCopyResumeFile(t, srcDir, "b-dir/child.txt", "child")
+
+	baseSrc := newCopyResumeLocalFs(t, ctx, srcDir)
+	fsrc := &copyResumeFailListOnceFs{
+		Fs:      baseSrc,
+		failDir: "b-dir",
+		err:     errCopyResumeInjected,
+	}
+	fdst := newCopyResumeLocalFs(t, ctx, dstDir)
+	store := pinCopyResumeStore(t, ctx)
+
+	accounting.GlobalStats().ResetCounters()
+	defer accounting.GlobalStats().ResetCounters()
+
+	err := CopyDir(ctx, fdst, fsrc, false)
+	require.ErrorContains(t, err, errCopyResumeInjected.Error())
+
+	snapshot := copyResumeSnapshot(t, store)
+	require.NotNil(t, snapshot.Scan.FileTree)
+	require.NotEmpty(t, snapshot.Scan.FileTree.Window.InflightTasks)
+
+	err = CopyDir(ctx, fdst, baseSrc, false)
+	require.NoError(t, err)
+	assert.Equal(t, "before", readCopyResumeFile(t, dstDir, "a-before.txt"))
+	assert.Equal(t, "child", readCopyResumeFile(t, dstDir, "b-dir/child.txt"))
+}
+
 func TestResumeObjectFrontierReadyHonorsContiguousPrefix(t *testing.T) {
 	pending := map[int64]resumeObjectSegmentResult{
 		2: {segment: resume.ObjectSegment{SegmentID: 2, Status: resume.ObjectSegmentDone, EndKey: "b.txt"}},
@@ -312,8 +345,8 @@ func TestCommitResumeReadyFileTasksStopsAtFailure(t *testing.T) {
 			}},
 		},
 		2: {
-			task:        resume.FileTask{TaskID: 2, Status: resume.FileTaskFailed, EndFile: "b.txt"},
-			startFrames: []resume.ScanFrame{{Dir: "", DstDir: "", LastDoneEntryKey: "0:1"}},
+			task:         resume.FileTask{TaskID: 2, Status: resume.FileTaskFailed, EndFile: "b.txt"},
+			startFrames:  []resume.ScanFrame{{Dir: "", DstDir: "", LastDoneEntryKey: "0:1"}},
 			commitFrames: []resume.ScanFrame{{Dir: "", DstDir: "", LastDoneEntryKey: "0:2"}},
 			successCommits: []resume.SuccessCommit{{
 				Done:         resume.DoneRecord{WorkKey: "wk2-ok", Name: "b-ok.txt", Files: 1, Objects: 1, Bytes: 11},
@@ -1119,6 +1152,20 @@ type copyResumeCountingFs struct {
 
 func (f *copyResumeCountingFs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
 	f.listCalls.Add(1)
+	return f.Fs.List(ctx, dir)
+}
+
+type copyResumeFailListOnceFs struct {
+	fs.Fs
+	failDir string
+	err     error
+	failed  atomic.Bool
+}
+
+func (f *copyResumeFailListOnceFs) List(ctx context.Context, dir string) (fs.DirEntries, error) {
+	if dir == f.failDir && !f.failed.Swap(true) {
+		return nil, f.err
+	}
 	return f.Fs.List(ctx, dir)
 }
 
