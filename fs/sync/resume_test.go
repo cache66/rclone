@@ -386,6 +386,97 @@ func TestCommitResumeReadyFileTasksStopsAtFailure(t *testing.T) {
 	assert.Equal(t, "b.txt", failed[0].SrcRemote)
 }
 
+func TestCommitResumeReadyFileTasksPersistsRemainingInflightStart(t *testing.T) {
+	ctx := newCopyResumeTestContext(t, "copy-resume-file-frontier-remaining-start", 1)
+	meta := resume.Meta{
+		FormatVersion: resume.FormatVersion,
+		JobID:         fs.GetConfig(ctx).ResumeID,
+		Op:            "copy",
+		SrcConfig:     "src",
+		DstConfig:     "dst",
+	}
+	initialScan := resume.ScanState{
+		Phase:  resume.PhaseCopySource,
+		Target: "src",
+		Frames: []resume.ScanFrame{{Dir: "", DstDir: ""}},
+		FileTree: &resume.FileTreeScanState{
+			Frames: []resume.FileFrame{{Dir: "", DstDir: "", LastEntry: "stale"}},
+			Window: resume.FileWindowState{
+				WindowSize: 2,
+				InflightTasks: []resume.FileTask{
+					{
+						TaskID: 1,
+						StartFrameSnapshot: []resume.FileFrame{{
+							Dir:       "",
+							DstDir:    "",
+							LastEntry: "task-1-start",
+						}},
+					},
+					{
+						TaskID: 2,
+						StartFrameSnapshot: []resume.FileFrame{{
+							Dir:       "",
+							DstDir:    "",
+							LastEntry: "task-2-start",
+						}},
+					},
+				},
+			},
+		},
+	}
+	store, err := resume.Open(ctx, meta.JobID)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, store.Close(true))
+	}()
+	snapshot, _, err := store.LoadOrInit(meta, initialScan)
+	require.NoError(t, err)
+
+	s := &syncCopyMove{ctx: ctx, ci: fs.GetConfig(ctx)}
+	inflight := []resume.FileTask{
+		{
+			TaskID: 1,
+			StartFrameSnapshot: []resume.FileFrame{{
+				Dir:       "",
+				DstDir:    "",
+				LastEntry: "task-1-start",
+			}},
+		},
+		{
+			TaskID: 2,
+			StartFrameSnapshot: []resume.FileFrame{{
+				Dir:       "",
+				DstDir:    "",
+				LastEntry: "task-2-start",
+			}},
+		},
+	}
+	pending := map[int64]resumeFileTaskResult{
+		1: {
+			task: resume.FileTask{TaskID: 1, Status: resume.FileTaskDone, EndFile: "a.txt"},
+			commitFrames: []resume.ScanFrame{{
+				Dir:              "",
+				DstDir:           "",
+				LastDoneEntryKey: "task-1-commit",
+			}},
+			successCommits: []resume.SuccessCommit{{
+				Done:         resume.DoneRecord{WorkKey: "wk1", Name: "a.txt", Files: 1, Objects: 1, Bytes: 10},
+				HistoryLimit: s.ci.ResumeHistoryLimit,
+			}},
+		},
+	}
+
+	nextFrontier, remaining, blocked, err := s.commitResumeReadyFileTasks(store, &snapshot, 0, pending, inflight)
+	require.NoError(t, err)
+	assert.False(t, blocked)
+	assert.Equal(t, int64(1), nextFrontier)
+	require.Len(t, remaining, 1)
+	assert.Equal(t, int64(2), remaining[0].TaskID)
+	require.NotNil(t, snapshot.Scan.FileTree)
+	require.Len(t, snapshot.Scan.FileTree.Frames, 1)
+	assert.Equal(t, "task-2-start", snapshot.Scan.FileTree.Frames[0].LastEntry)
+}
+
 func TestCopyDirResumeRestoresDeepDirectoryStack(t *testing.T) {
 	ctx := newCopyResumeTestContext(t, "copy-resume-deep-stack", 1)
 	srcDir := t.TempDir()

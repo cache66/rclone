@@ -357,11 +357,17 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 		}
 		task := newResumeFileTask(nextTaskID, batch, batchStartFrames, batchCommitFrames)
 		resume.RecordFileTaskCreated(task.meta.FileCount, task.meta.ByteCount)
+		// Only persist when the earliest inflight task changes. Later tasks in
+		// the same window are safely rediscovered by restarting from that earliest
+		// persisted task, so saving every dispatch just adds checkpoint churn.
+		earliestInflightChanged := len(inflight) == 0
 		task.meta.Status = resume.FileTaskRunning
 		inflight = append(inflight, task.meta)
 		inflightCount++
-		if err := persistFileScan(true, false); err != nil {
-			return err
+		if earliestInflightChanged {
+			if err := persistFileScan(true, false); err != nil {
+				return err
+			}
 		}
 		go func(fileTask resumeFileTask) {
 			resultsCh <- s.runResumeFileTask(fileTask)
@@ -1050,7 +1056,7 @@ func (s *syncCopyMove) commitResumeReadyFileTasks(store *resume.Store, snapshot 
 		return nextFrontierTaskID, remainingInflight, true, nil
 	}
 
-	snapshot.Scan = s.resumeFileScanState(snapshot, s.resumeLegacyFileFrames(snapshot), nextFrontierTaskID, remainingInflight, false)
+	snapshot.Scan = s.resumeFileScanState(snapshot, s.resumeFileCheckpointFrames(snapshot, successReady, remainingInflight), nextFrontierTaskID, remainingInflight, false)
 	if err := store.SaveScan(snapshot.Scan); err != nil {
 		return nextFrontierTaskID, remainingInflight, false, err
 	}
@@ -1459,6 +1465,17 @@ func (s *syncCopyMove) resumeLegacyFileFrames(snapshot *resume.Snapshot) []resum
 		}
 	}
 	return append([]resume.ScanFrame(nil), snapshot.Scan.Frames...)
+}
+
+func (s *syncCopyMove) resumeFileCheckpointFrames(snapshot *resume.Snapshot, committed []resumeFileTaskResult, inflight []resume.FileTask) []resume.ScanFrame {
+	if earliest := s.resumeEarliestInflightFileFrames(inflight); len(earliest) > 0 {
+		return earliest
+	}
+	if len(committed) > 0 {
+		last := committed[len(committed)-1]
+		return append([]resume.ScanFrame(nil), last.commitFrames...)
+	}
+	return s.resumeLegacyFileFrames(snapshot)
 }
 
 func (s *syncCopyMove) resumeEarliestInflightFileFrames(tasks []resume.FileTask) []resume.ScanFrame {
