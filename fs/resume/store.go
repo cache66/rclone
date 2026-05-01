@@ -39,7 +39,9 @@ type SuccessCommit struct {
 // SuccessBatchCommit describes a group of completed work items that can be
 // persisted with a single snapshot rewrite.
 type SuccessBatchCommit struct {
-	Commits []SuccessCommit
+	Commits            []SuccessCommit
+	SkipDoneRecords    bool
+	SkipFailureRecords bool
 }
 
 // FailureCommit describes the data written when a work item failed.
@@ -211,7 +213,7 @@ func (s *Store) CommitSuccessBatch(commit SuccessBatchCommit) (snapshot Snapshot
 			return err
 		}
 		for _, item := range commit.Commits {
-			if err := s.applySuccessLocked(b, item, &snapshot); err != nil {
+			if err := s.applySuccessLockedWithOptions(b, item, &snapshot, !commit.SkipDoneRecords, !commit.SkipFailureRecords); err != nil {
 				return err
 			}
 		}
@@ -237,13 +239,26 @@ func (s *Store) commitSuccessLocked(b kv.Bucket, commit SuccessCommit, snapshot 
 }
 
 func (s *Store) applySuccessLocked(b kv.Bucket, commit SuccessCommit, snapshot *Snapshot) error {
-	doneExists := len(b.Get([]byte(s.doneKey(commit.Done.WorkKey)))) != 0
-	failedKey := s.failedKey(commit.Done.WorkKey)
-	failedExists := len(b.Get([]byte(failedKey))) != 0
+	return s.applySuccessLockedWithOptions(b, commit, snapshot, true, true)
+}
+
+func (s *Store) applySuccessLockedWithOptions(b kv.Bucket, commit SuccessCommit, snapshot *Snapshot, writeDoneRecord, checkFailureRecord bool) error {
+	doneExists := false
+	if writeDoneRecord {
+		doneExists = len(b.Get([]byte(s.doneKey(commit.Done.WorkKey)))) != 0
+	}
+	failedExists := false
+	failedKey := ""
+	if checkFailureRecord {
+		failedKey = s.failedKey(commit.Done.WorkKey)
+		failedExists = len(b.Get([]byte(failedKey))) != 0
+	}
 
 	if !doneExists {
-		if err := writeJSONValue(b, s.doneKey(commit.Done.WorkKey), commit.Done); err != nil {
-			return err
+		if writeDoneRecord {
+			if err := writeJSONValue(b, s.doneKey(commit.Done.WorkKey), commit.Done); err != nil {
+				return err
+			}
 		}
 		snapshot.Totals.Files += commit.Done.Files
 		snapshot.Totals.Objects += commit.Done.Objects

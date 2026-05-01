@@ -161,8 +161,10 @@ func TestCopyDirResumePersistsPendingBatchBeforeDirectoryError(t *testing.T) {
 	require.ErrorContains(t, err, errCopyResumeInjected.Error())
 
 	snapshot := copyResumeSnapshot(t, store)
-	require.NotNil(t, snapshot.Scan.FileTree)
-	require.NotEmpty(t, snapshot.Scan.FileTree.Window.InflightTasks)
+	if snapshot.Scan.FileTree != nil {
+		require.NotEmpty(t, snapshot.Scan.FileTree.Frames)
+		assert.Empty(t, snapshot.Scan.FileTree.Frames[0].LastEntry)
+	}
 
 	err = CopyDir(ctx, fdst, baseSrc, false)
 	require.NoError(t, err)

@@ -361,10 +361,14 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 		return nil
 	}
 
-	dispatchBatchBeforeCursorAdvance := func() error {
-		if len(batch) == 0 {
+	checkpointScanIfNoPendingBatch := func(complete bool) error {
+		if len(batch) > 0 {
 			return nil
 		}
+		return persistFileScan(false, complete)
+	}
+
+	dispatchBatchAndThrottle := func() error {
 		if err := dispatchTask(); err != nil {
 			return err
 		}
@@ -425,12 +429,6 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 			}
 			switch x := srcEntry.(type) {
 			case fs.Directory:
-				if err := dispatchBatchBeforeCursorAdvance(); err != nil {
-					return err
-				}
-				if frontierBlocked {
-					break
-				}
 				resume.RecordFileScanDirectory()
 				nextDstDir, dirErr := s.handleResumeDirectory(x, dstListing.byKey[matchKey])
 				if dirErr != nil {
@@ -438,7 +436,7 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 				}
 				frame.LastDoneEntryKey = cursorKey
 				frames = append(frames, resume.ScanFrame{Dir: x.Remote(), DstDir: nextDstDir})
-				if err := persistFileScan(false, false); err != nil {
+				if err := checkpointScanIfNoPendingBatch(false); err != nil {
 					return err
 				}
 				descended = true
@@ -462,7 +460,7 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 				batchCommitFrames[len(batchCommitFrames)-1].LastDoneEntryKey = cursorKey
 				batch = append(batch, task)
 				if len(batch) >= resumeCopyCommitBatchSize || (!batchOpenedAt.IsZero() && time.Since(batchOpenedAt) >= resumeCopyCommitBatchInterval) {
-					if err := dispatchBatchBeforeCursorAdvance(); err != nil {
+					if err := dispatchBatchAndThrottle(); err != nil {
 						return err
 					}
 				}
@@ -477,29 +475,17 @@ func (s *syncCopyMove) runResumeFileScan(store *resume.Store, snapshot *resume.S
 			continue
 		}
 		if srcPage.page.NextContinuationToken != "" {
-			if err := dispatchBatchBeforeCursorAdvance(); err != nil {
-				return err
-			}
-			if frontierBlocked {
-				continue
-			}
 			frame.ContinuationToken = srcPage.page.NextContinuationToken
 			frame.PageIndex = pageIndex + 1
-			if err := persistFileScan(false, false); err != nil {
+			if err := checkpointScanIfNoPendingBatch(false); err != nil {
 				return err
 			}
-			continue
-		}
-		if err := dispatchBatchBeforeCursorAdvance(); err != nil {
-			return err
-		}
-		if frontierBlocked {
 			continue
 		}
 		delete(dstListings, listingKey)
 		delete(srcPages, srcPageKey)
 		frames = frames[:len(frames)-1]
-		if err := persistFileScan(false, len(frames) == 0 && inflightCount == 0 && len(batch) == 0); err != nil {
+		if err := checkpointScanIfNoPendingBatch(len(frames) == 0 && inflightCount == 0); err != nil {
 			return err
 		}
 	}
@@ -958,7 +944,11 @@ func (s *syncCopyMove) commitResumeReadyFileTasks(store *resume.Store, snapshot 
 			}
 		}
 		if len(commits) > 0 {
-			newSnapshot, commitErr := store.CommitSuccessBatch(resume.SuccessBatchCommit{Commits: commits})
+			newSnapshot, commitErr := store.CommitSuccessBatch(resume.SuccessBatchCommit{
+				Commits:            commits,
+				SkipDoneRecords:    true,
+				SkipFailureRecords: snapshot.Totals.PendingFailedCount == 0,
+			})
 			if commitErr != nil {
 				return nextFrontierTaskID, remainingInflight, false, commitErr
 			}

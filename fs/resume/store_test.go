@@ -270,3 +270,118 @@ func TestCommitSuccessBatchAggregatesSnapshotRewrite(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, done2)
 }
+
+func TestCommitSuccessBatchCanSkipDoneRecords(t *testing.T) {
+	cacheDir := t.TempDir()
+	require.NoError(t, config.SetCacheDir(cacheDir))
+
+	ctx := context.Background()
+	meta := Meta{
+		FormatVersion: FormatVersion,
+		JobID:         "resume-batch-skip-done",
+		Op:            "copy",
+		SrcConfig:     "src",
+		DstConfig:     "dst",
+	}
+	initialScan := ScanState{
+		Phase:  PhaseCopySource,
+		Target: "src",
+		Frames: []ScanFrame{{Dir: ""}},
+	}
+
+	store, err := Open(ctx, meta.JobID)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, store.Close(true))
+	}()
+
+	_, _, err = store.LoadOrInit(meta, initialScan)
+	require.NoError(t, err)
+
+	snapshot, err := store.CommitSuccessBatch(SuccessBatchCommit{
+		SkipDoneRecords:    true,
+		SkipFailureRecords: true,
+		Commits: []SuccessCommit{{
+			Done: DoneRecord{
+				WorkKey: "copy:file1",
+				Name:    "src/file1",
+				Files:   1,
+				Objects: 1,
+				Bytes:   10,
+			},
+			Scan:         initialScan,
+			Event:        HistoryEvent{Kind: "success", Name: "src/file1", Bytes: 10},
+			HistoryLimit: 10,
+		}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), snapshot.Totals.Files)
+	assert.Equal(t, int64(10), snapshot.Totals.Bytes)
+	assert.Len(t, snapshot.History, 1)
+
+	done, err := store.HasDone("copy:file1")
+	require.NoError(t, err)
+	assert.False(t, done)
+}
+
+func TestCommitSuccessBatchSkipDoneCanClearFailures(t *testing.T) {
+	cacheDir := t.TempDir()
+	require.NoError(t, config.SetCacheDir(cacheDir))
+
+	ctx := context.Background()
+	meta := Meta{
+		FormatVersion: FormatVersion,
+		JobID:         "resume-batch-skip-done-clear-failure",
+		Op:            "copy",
+		SrcConfig:     "src",
+		DstConfig:     "dst",
+	}
+	initialScan := ScanState{
+		Phase:  PhaseCopySource,
+		Target: "src",
+		Frames: []ScanFrame{{Dir: ""}},
+	}
+
+	store, err := Open(ctx, meta.JobID)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, store.Close(true))
+	}()
+
+	snapshot, _, err := store.LoadOrInit(meta, initialScan)
+	require.NoError(t, err)
+	snapshot, err = store.CommitFailure(FailureCommit{
+		Failed: FailedRecord{
+			WorkKey:   "copy:file1",
+			SrcRemote: "src/file1",
+			LastError: "boom",
+		},
+		Scan:         initialScan,
+		Event:        HistoryEvent{Kind: "failure", Name: "src/file1", Error: "boom"},
+		HistoryLimit: 10,
+	})
+	require.NoError(t, err)
+	require.Equal(t, int64(1), snapshot.Totals.PendingFailedCount)
+
+	snapshot, err = store.CommitSuccessBatch(SuccessBatchCommit{
+		SkipDoneRecords: true,
+		Commits: []SuccessCommit{{
+			Done: DoneRecord{
+				WorkKey: "copy:file1",
+				Name:    "src/file1",
+				Files:   1,
+				Objects: 1,
+				Bytes:   10,
+			},
+			Scan:         initialScan,
+			Event:        HistoryEvent{Kind: "success", Name: "src/file1", Bytes: 10},
+			HistoryLimit: 10,
+		}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), snapshot.Totals.PendingFailedCount)
+	assert.Equal(t, int64(1), snapshot.Totals.RecoveredFromError)
+	failed, err := store.ListFailed()
+	require.NoError(t, err)
+	assert.Empty(t, failed)
+}
