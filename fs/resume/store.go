@@ -351,6 +351,53 @@ func (s *Store) Clear() error {
 	return err
 }
 
+// ImportSnapshot replaces the local resume state with a previously exported
+// snapshot. It is used by orchestration layers to move a resumable job between
+// hosts while preserving the safe scan frontier.
+func (s *Store) ImportSnapshot(snapshot Snapshot, failed []FailedRecord) error {
+	if snapshot.Meta.JobID == "" {
+		snapshot.Meta.JobID = s.jobID
+	}
+	if snapshot.Meta.JobID != s.jobID {
+		return fmt.Errorf("resume snapshot job ID %q does not match store job ID %q", snapshot.Meta.JobID, s.jobID)
+	}
+	for _, record := range failed {
+		if record.WorkKey == "" {
+			return fmt.Errorf("resume failed record for %q is missing work key", record.Name)
+		}
+	}
+	now := time.Now()
+	if snapshot.Totals.StartTime.IsZero() {
+		snapshot.Totals.StartTime = now
+	}
+	if snapshot.Run.StartTime.IsZero() {
+		snapshot.Run.StartTime = now
+	}
+	snapshot.Totals.PendingFailedCount = int64(len(failed))
+	if snapshot.Run.PendingFailedCount > snapshot.Totals.PendingFailedCount {
+		snapshot.Run.PendingFailedCount = snapshot.Totals.PendingFailedCount
+	}
+
+	err := s.db.Do(true, bucketOp(func(ctx context.Context, b kv.Bucket) error {
+		if err := deletePrefix(b, s.prefix("")); err != nil {
+			return err
+		}
+		if err := s.writeSnapshotLocked(b, snapshot); err != nil {
+			return err
+		}
+		for _, record := range failed {
+			if err := writeJSONValue(b, s.failedKey(record.WorkKey), record); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	if err == nil {
+		RecordCommittedTotals(snapshot.Totals.Files, snapshot.Totals.Bytes)
+	}
+	return err
+}
+
 func (s *Store) writeSnapshot(snapshot Snapshot) error {
 	return s.db.Do(true, bucketOp(func(ctx context.Context, b kv.Bucket) error {
 		return s.writeSnapshotLocked(b, snapshot)

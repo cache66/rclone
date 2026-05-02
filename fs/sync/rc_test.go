@@ -2,6 +2,9 @@ package sync
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -221,6 +224,91 @@ func TestRcResumeStatusAndClear(t *testing.T) {
 	failed, ok = out["failed"].([]resume.FailedRecord)
 	require.True(t, ok)
 	assert.Nil(t, failed)
+}
+
+func TestRcResumeImportRestoresSnapshot(t *testing.T) {
+	require.NoError(t, config.SetCacheDir(t.TempDir()))
+	r, statusCall := rcNewRun(t, "sync/resume/status")
+	importCall := rc.Calls.Get("sync/resume/import")
+	require.NotNil(t, importCall)
+
+	ctx := context.Background()
+	meta := resume.NewMeta(ctx, "copy", r.Flocal, r.Fremote)
+	meta.JobID = "resume-rc-import"
+	pinnedStore, err := resume.Open(ctx, meta.JobID)
+	require.NoError(t, err)
+	defer func() {
+		require.NoError(t, pinnedStore.Close(false))
+	}()
+	now := time.Now()
+	payload := map[string]any{
+		"jobId": meta.JobID,
+		"found": true,
+		"meta":  meta,
+		"scan": resume.ScanState{
+			Phase:  resume.PhaseCopySource,
+			Target: "src",
+			Frames: []resume.ScanFrame{{
+				Dir:              "",
+				DstDir:           "",
+				LastDoneEntryKey: "0:10",
+			}},
+		},
+		"totals": resume.CounterState{
+			Files:              7,
+			Bytes:              700,
+			PendingFailedCount: 1,
+			StartTime:          now,
+		},
+		"run": resume.CounterState{
+			StartTime: now,
+		},
+		"history": []resume.HistoryEvent{{
+			Kind:        "failure",
+			Name:        "file7",
+			Error:       "boom",
+			StartedAt:   now,
+			CompletedAt: now,
+		}},
+		"failed": []resume.FailedRecord{{
+			WorkKey:       "copy:file7",
+			Op:            "copy",
+			Kind:          "object",
+			SrcRemote:     "file7",
+			DstRemote:     "file7",
+			Name:          "file7",
+			Size:          7,
+			FirstFailedAt: now,
+			LastFailedAt:  now,
+			LastError:     "boom",
+			Failures:      1,
+		}},
+	}
+	data, err := json.Marshal(payload)
+	require.NoError(t, err)
+	payloadFile := filepath.Join(t.TempDir(), "resume-import.json")
+	require.NoError(t, os.WriteFile(payloadFile, data, 0o600))
+
+	importOut, err := importCall.Fn(ctx, rc.Params{
+		"jobId":       meta.JobID,
+		"payloadFile": payloadFile,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, meta.JobID, importOut["jobId"])
+	assert.Equal(t, true, importOut["imported"])
+	assert.Equal(t, false, importOut["previousFound"])
+
+	out, err := statusCall.Fn(ctx, rc.Params{"jobId": meta.JobID})
+	require.NoError(t, err)
+	assert.Equal(t, true, out["found"])
+	totals, ok := out["totals"].(resume.CounterState)
+	require.True(t, ok)
+	assert.Equal(t, int64(7), totals.Files)
+	assert.Equal(t, int64(700), totals.Bytes)
+	failed, ok := out["failed"].([]resume.FailedRecord)
+	require.True(t, ok)
+	require.Len(t, failed, 1)
+	assert.Equal(t, "file7", failed[0].Name)
 }
 
 func TestRcResumeStatusWithoutState(t *testing.T) {

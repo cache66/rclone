@@ -2,7 +2,9 @@ package sync
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/rc"
@@ -74,6 +76,24 @@ or:
 
 - srcFs - source remote name
 - dstFs - destination remote name`,
+	})
+
+	rc.Add(rc.Call{
+		Path:         "sync/resume/import",
+		AuthRequired: true,
+		Fn:           rcResumeImport,
+		Title:        "Import persisted copy resume state",
+		Help: `This imports a previously exported resume status payload for a copy job.
+
+Supply either:
+
+- jobId - explicit resume job ID
+- resumeId - explicit resume job ID
+
+and one of:
+
+- payload - JSON payload returned by sync/resume/status
+- payloadFile - path to a JSON payload file on the rclone host`,
 	})
 }
 
@@ -198,6 +218,106 @@ func rcResumeClear(ctx context.Context, in rc.Params) (out rc.Params, err error)
 		"jobId":   jobID,
 		"found":   found,
 		"cleared": found,
+	}, nil
+}
+
+type resumeImportPayload struct {
+	JobID      string                `json:"jobId"`
+	Found      bool                  `json:"found"`
+	Meta       resume.Meta           `json:"meta"`
+	Scan       resume.ScanState      `json:"scan"`
+	Totals     resume.CounterState   `json:"totals"`
+	StatsTotal resume.CounterState   `json:"stats_total"`
+	Run        resume.CounterState   `json:"run"`
+	StatsRun   resume.CounterState   `json:"stats_run"`
+	History    []resume.HistoryEvent `json:"history"`
+	Failed     []resume.FailedRecord `json:"failed"`
+}
+
+func (p resumeImportPayload) snapshot(jobID string) (resume.Snapshot, error) {
+	if !p.Found && p.Meta.JobID == "" {
+		return resume.Snapshot{}, fmt.Errorf("resume import payload does not contain a found snapshot")
+	}
+	if p.Meta.JobID == "" {
+		p.Meta.JobID = p.JobID
+	}
+	if p.Meta.JobID == "" {
+		p.Meta.JobID = jobID
+	}
+	if p.Meta.JobID != jobID {
+		return resume.Snapshot{}, fmt.Errorf("resume import payload job ID %q does not match requested job ID %q", p.Meta.JobID, jobID)
+	}
+	totals := p.Totals
+	if totals.StartTime.IsZero() && p.StatsTotal.StartTime.IsZero() && totals.Files == 0 && totals.Bytes == 0 {
+		totals = p.StatsTotal
+	}
+	run := p.Run
+	if run.StartTime.IsZero() && p.StatsRun.StartTime.IsZero() && run.Files == 0 && run.Bytes == 0 {
+		run = p.StatsRun
+	}
+	return resume.Snapshot{
+		Meta:    p.Meta,
+		Scan:    p.Scan,
+		Totals:  totals,
+		Run:     run,
+		History: p.History,
+	}, nil
+}
+
+func rcResumeImport(ctx context.Context, in rc.Params) (out rc.Params, err error) {
+	jobID, err := rcResumeJobID(ctx, in)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := in.GetString("payload")
+	if rc.NotErrParamNotFound(err) {
+		return nil, err
+	}
+	if err != nil {
+		payloadFile, fileErr := in.GetString("payloadFile")
+		if fileErr != nil {
+			if rc.NotErrParamNotFound(fileErr) {
+				return nil, fileErr
+			}
+			return nil, err
+		}
+		data, readErr := os.ReadFile(payloadFile)
+		if readErr != nil {
+			return nil, readErr
+		}
+		payload = string(data)
+	}
+
+	var imported resumeImportPayload
+	if err = json.Unmarshal([]byte(payload), &imported); err != nil {
+		return nil, fmt.Errorf("decode resume import payload: %w", err)
+	}
+	snapshot, err := imported.snapshot(jobID)
+	if err != nil {
+		return nil, err
+	}
+
+	store, err := resume.Open(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_ = store.Close(false)
+	}()
+
+	previous, err := store.Snapshot()
+	if err != nil {
+		return nil, err
+	}
+	previousFound := previous.Meta.JobID != ""
+	if err = store.ImportSnapshot(snapshot, imported.Failed); err != nil {
+		return nil, err
+	}
+	return rc.Params{
+		"jobId":         jobID,
+		"imported":      true,
+		"previousFound": previousFound,
+		"totals":        snapshot.Totals,
 	}, nil
 }
 
