@@ -1,0 +1,137 @@
+[
+  {
+    "id": 21,
+    "executeId": "bef8a82c-fb8b-47a1-ab06-d4bc35819d2d",
+    "group": "job/21",
+    "startTime": "2026-02-17T09:56:49.0477232+08:00",
+    "endTime": "2026-02-17T09:56:49.163967+08:00",
+    "error": "",
+    "finished": true,
+    "success": true,
+    "duration": 0.1162438,
+    "output": {
+      "bytesPerSecond": 2097152,
+      "bytesPerSecondRx": 2097152,
+      "bytesPerSecondTx": 2097152,
+      "rate": "2Mi"
+    },
+    "params": {
+      "rate": "2M"
+    }
+  },
+  {
+    "id": 6,
+    "executeId": "cc881449-b13d-43c3-a643-746842d6f02e",
+    "group": "job/6",
+    "startTime": "2026-02-01T14:42:11.6127504+08:00",
+    "endTime": "2026-02-01T14:56:50.2492517+08:00",
+    "error": "",
+    "finished": true,
+    "success": true,
+    "duration": 878.6365013,
+    "output": {},
+    "params": {
+      "createEmptySrcDirs": true,
+      "dstFs": "e:/test6",
+      "srcFs": "D:/anaconda3"
+    }
+  },
+  {
+    "id": 17,
+    "executeId": "cc881449-b13d-43c3-a643-746842d6f02e",
+    "group": "job/17",
+    "startTime": "2026-02-01T15:15:42.461186+08:00",
+    "endTime": "2026-02-01T15:17:53.5344274+08:00",
+    "error": "context canceled",
+    "finished": true,
+    "success": false,
+    "duration": 131.0732414,
+    "output": {},
+    "params": {
+      "createEmptySrcDirs": true,
+      "dstFs": "e:/test7",
+      "srcFs": "D:/anaconda3"
+    }
+  },
+  {
+    "id": 2,
+    "executeId": "bcaaf04e-35e1-46c6-99ec-71d68818ed90",
+    "group": "job/2",
+    "startTime": "2026-01-28T23:33:18.6229205+08:00",
+    "endTime": "2026-01-28T23:33:18.7251297+08:00",
+    "error": "",
+    "finished": true,
+    "success": true,
+    "duration": 0.1022092,
+    "output": {},
+    "params": {
+      "createEmptySrcDirs": true,
+      "dstFs": "e:/test5",
+      "srcFs": "C:/kingsoft"
+    }
+  },
+  {
+    "id": 3,
+    "executeId": "bcaaf04e-35e1-46c6-99ec-71d68818ed90",
+    "group": "job/3",
+    "startTime": "2026-01-28T23:48:19.7037926+08:00",
+    "endTime": "2026-01-28T23:49:45.8357662+08:00",
+    "error": "context canceled",
+    "finished": true,
+    "success": false,
+    "duration": 86.1319736,
+    "output": {},
+    "params": {
+      "createEmptySrcDirs": true,
+      "dstFs": "e:/test5",
+      "srcFs": "D:/anaconda3"
+    }
+  },
+  {
+    "id": 5,
+    "executeId": "cc881449-b13d-43c3-a643-746842d6f02e",
+    "group": "job/5",
+    "startTime": "2026-02-01T21:03:28.1203131+08:00",
+    "endTime": "0001-01-01T00:00:00Z",
+    "error": "",
+    "finished": false,
+    "success": false,
+    "duration": 0,
+    "output": null,
+    "params": {}
+  },
+  {
+    "id": 20,
+    "executeId": "cc881449-b13d-43c3-a643-746842d6f02e",
+    "group": "job/20",
+    "startTime": "2026-02-01T21:03:28.1177771+08:00",
+    "endTime": "2026-02-01T21:03:28.3044526+08:00",
+    "error": "directory not found",
+    "finished": true,
+    "success": false,
+    "duration": 0.1866755,
+    "output": {},
+    "params": {
+      "createEmptySrcDirs": true,
+      "dstFs": "e:/test7",
+      "srcFs": "D:/anaconda"
+    }
+  },
+  {
+    "id": 1,
+    "executeId": "bcaaf04e-35e1-46c6-99ec-71d68818ed90",
+    "group": "job/1",
+    "startTime": "2026-01-28T23:32:24.0364223+08:00",
+    "endTime": "2026-01-28T23:32:24.1509514+08:00",
+    "error": "",
+    "finished": true,
+    "success": true,
+    "duration": 0.1145291,
+    "output": {},
+    "params": {
+      "createEmptySrcDirs": true,
+      "dstFs": "e:/test3",
+      "srcFs": "C:/kingsoft"
+    }
+  }
+]
